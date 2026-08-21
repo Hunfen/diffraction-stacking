@@ -29,37 +29,10 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      // Vite 8 基于 Rolldown：output.codeSplitting 等价于旧版 manualChunks，
-      // 把 antd / recharts / react 系依赖拆成独立 vendor chunk，消除 >500kB 单 chunk 警告。
-      rolldownOptions: {
-        output: {
-          codeSplitting: {
-            groups: [
-              {
-                name: 'antd',
-                test: /node_modules[\\/]antd[\\/]/,
-                maxSize: 500 * 1024,
-              },
-              {
-                name: 'antd-icons',
-                test: /node_modules[\\/]@ant-design[\\/]/,
-              },
-              {
-                name: 'rc-components',
-                test: /node_modules[\\/](@rc-component|rc-[a-z-]+)[\\/]/,
-              },
-              {
-                name: 'charts',
-                test: /node_modules[\\/](recharts|d3-|victory-vendor|react-smooth|decimal\.js)[\\/]/,
-              },
-              {
-                name: 'react-vendor',
-                test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler|axios|dayjs)[\\/]/,
-              },
-            ],
-          },
-        },
-      },
+      // 说明：曾尝试用 rolldownOptions.output.codeSplitting 手工拆分 antd/recharts vendor chunk，
+      // 但 Rolldown 手工分组会制造跨 chunk 循环引用，生产运行时白屏（"M/I is not a function"）。
+      // 因此改为默认代码拆分：正确性优先；chunk 体积告警可通过 chunkSizeWarningLimit 调整。
+      chunkSizeWarningLimit: 2000,
     },
   };
 });
