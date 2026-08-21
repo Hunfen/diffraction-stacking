@@ -19,3 +19,6 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# AgentTeams internal state
+.agent-teams/

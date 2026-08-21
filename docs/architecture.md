@@ -1,6 +1,6 @@
-# 电子衍射图像采集与处理系统 — 架构设计 v0.2
+# 电子衍射图像采集与处理系统 — 架构设计 v0.3
 
-> 目标：为静态电子衍射点阵（荧光屏/衍射屏上的弱光斑）构建一套
+> 目标：为 **LEED / RHEED 衍射屏上的静态电子衍射点**构建一套
 > 「实时预览 + 参数控制 + 序列拍摄 + 天文式标定叠加」的 Web 系统。
 > 方法借用深空摄影的短曝光多帧 + Bias/Dark/Flat 标定 + Sigma 叠加，
 > **不含**赤道仪、导星、去旋转等地球自转相关环节。
@@ -53,7 +53,8 @@ flowchart LR
 - **前端**：浏览器单页应用（SPA），通过 REST 控制、WebSocket 收视频流与任务进度。
 - **后端**：FastAPI 单体服务，内置 4 个子服务；相机访问统一走 `imagingcontrol4`（ic4）。
 - **关键约束**：ic4 只支持 **Windows / Linux**，不支持 macOS。
-  因此相机采集后端必须运行在采集主机上；浏览器前端可在任何机器（包括 macOS）打开。
+  因此相机采集后端必须运行在 Windows 采集主机上；Web 前端在**局域网内**
+  任意设备的浏览器打开（已确认纯 Web、仅局域网）。
 
 ---
 
@@ -61,13 +62,14 @@ flowchart LR
 
 | 项目 | 要求 | 说明 |
 |---|---|---|
-| 采集主机 OS | **Linux（推荐）或 Windows** | ic4 官方支持；macOS 无法运行 ic4 |
+| 采集主机 OS | **Windows（已确认）** | ic4 官方支持；采集服务部署在 Windows 采集主机 |
+| 前端 | 纯 Web 网页（浏览器），仅局域网使用（已确认） | 任意设备浏览器访问，无需安装客户端 |
 | 网络 | 千兆网口直连相机（或同一交换机） | 开启 Jumbo Frame（巨型帧，如 9000 MTU）提升吞吐 |
 | 相机供电 | GigE 需要 PoE 或 12V 电源 | DMK 33GX249e 无制冷，注意环境温度稳定 |
 | Python | 3.10+ | 后端语言 |
 | 相机 SDK | `pip install imagingcontrol4` + ic4 驱动 | 驱动安装见 TIS 官方文档 |
 
-**Plan B（Linux）**：如 ic4 驱动与系统兼容性有问题，回退到 TIS 官方
+**Plan B（Windows）**：如 ic4 驱动与系统兼容性有问题，回退到 TIS 官方
 `tiscamera`（GStreamer + PyGObject），接口层封装成相同抽象，上层不变。
 
 ---
@@ -177,14 +179,20 @@ flowchart LR
 **拍摄计划（Plan）**：一个 Session 包含 4 类 Phase（可多实例、可排序、可跳过）：
 `type ∈ {bias, dark, flat, light}` + `count` + `exposure_override` + `note`。
 
-**状态机**：
+**状态机**（v1.1）：
 
 ```
 idle → running → (phase 开始前) waiting_user → capturing → phase_done
       → running → ... → finished | aborted | error
 ```
 
-- 每个 Phase 分三段：`prepare_prompt（用户确认）→ capture_loop → phase_report`
+- 每个 Phase 分三段：`prepare_prompt（waiting_user）→ capture_loop → phase_report`
+- **所有相位开始前都进入 `waiting_user` 并给出中文 prompt**：
+  - 非 LIGHT 相位 `needs_user=false`：展示约 0.2s 后自动进入 `capturing`（prompt 转入 message）；
+  - **LIGHT 相位 `needs_user=true`：强制人工确认点**，前端展示实时预览 + 直方图 + 当前参数，
+    由人工对照直方图确认曝光/增益/黑电平设置（中心束过曝程度人工判断可接受）后
+    `POST /api/capture/resume` 才进入 `capturing`；系统不自动改参数、不强制束挡
+- `GET /api/capture/state` 与 `/ws/events` 的 capture 消息均携带 `needs_user` 字段
 - 采集线程与保存线程分离：帧先进内存队列，保存线程写盘，不阻塞抓帧
 - 每帧保存 **16-bit FITS**（数据在低 12 位）+ 缩略 PNG；可选同步导出 TIFF
 - 每帧记录质量指标：mean / std / 饱和比例 / 温度 / 写入耗时
@@ -229,7 +237,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 项 | 定义 |
 |---|---|
 | 目的 | 校正像素响应非均匀性（PRNU）与照明/镜头暗角 |
-| 物理条件 | **均匀照明、无衍射图案**：如撤样品/束流散焦/均匀面光源照射 |
+| 物理条件 | **均匀照明、无衍射图案**：LEED/RHEED 用束流散焦均匀打在荧光屏上，或撤样品/均匀面光源 |
 | 曝光 | 自动或手动调到帧均值 ≈ **40–60% 满阱**（约 1600–2400 ADU @12-bit） |
 | 数量 | 30–50 张 |
 | 曝光与 light 不同 | 自动拍匹配的 flat-dark（见 Phase 2 规则） |
@@ -242,13 +250,14 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 项 | 定义 |
 |---|---|
 | 目的 | 采集真实电子衍射图案（核心数据） |
-| 物理条件 | 恢复正常衍射条件；**曝光以中心束不饱和为上限**（有束挡可适当加长） |
-| 参数 | 与 dark 完全一致；曝光确定后整组不变 |
+| 物理条件 | 恢复正常 LEED/RHEED 衍射条件；参数由人工确认（见下） |
+| 参数确认 | **强制人工确认**：进入本相位前停在 `waiting_user`，人工对照实时预览 + 直方图确认曝光/增益/黑电平；中心束过曝程度由人工判断可接受即可，系统不做束挡/HDR 专门方案 |
+| 参数 | 确认后整组不变；与 dark 完全一致 |
 | 数量 | ≥100–200 张（信噪比 ∝ √N） |
 | 每帧 QC | mean / std / 背景 std / 饱和像素比例 / 与参考帧的相关系数（漂移检测） |
-| 告警 | 饱和比例 > 1% 提示“中心束饱和”；相关系数连续下降提示漂移 |
+| 告警 | 饱和比例仅记录/展示（由人工判断是否可接受）；相关系数连续下降提示漂移 |
 | 数据用途 | 标定 → 叠加 → 弱衍射点提取 |
-| 前端引导文案 | “请恢复衍射条件并保持环境稳定，确认后开始连续拍摄 Light” |
+| 前端引导文案 | “请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light” |
 
 **默认拍摄顺序**：`BIAS → DARK → FLAT → LIGHT`。
 无制冷相机建议把 DARK 紧挨 LIGHT；顺序可在前端拖拽调整。
@@ -257,7 +266,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 
 ```
 DATE-OBS, EXPOSURE(µs), GAIN(dB), BLACKLEV, TELESCOP=DIFFRACTION,
-CAMERA=DMK 33GX249e, SERIAL, TEMPERATURE, FRAMETYP {bias|dark|flat|light},
+CAMERA=DMK 33GX249e, SERIAL, TEMP(°C), FRAMETYP {bias|dark|flat|light},
 SESSION, NFRAME, STACKCNT=1, BITPIX=16(有效位12)
 ```
 
@@ -266,27 +275,28 @@ SESSION, NFRAME, STACKCNT=1, BITPIX=16(有效位12)
 处理管线（深空方法裁剪版）：
 
 ```
-帧组(bias/dark/flat/light)
+帧组(bias/dark/flat/light)   # 支持 exclude 按文件名排除坏帧
   → ① Master 合成:
-       master_bias  = sigma-clipped mean/median(bias*)
-       master_dark  = sigma-clipped mean/median(dark*)
-       master_flat  = (mean(flat*) - master_bias) 归一化到中值=1
+       master_bias  = sigma-clipped mean/median(bias*, σ=3)
+       master_dark  = sigma-clipped mean/median(dark*, σ=3)
+       master_flat  = (mean(flat*) - 同曝光 dark) 归一化到中值=1
   → ② 逐帧标定:
-       cal = (light - master_dark) / master_flat
+       cal = (light - master_dark) / master_flat   # float32，负值截 0
   → ③ 可选配准(静态目标默认关闭):
-       对 cal 序列做 phase_cross_correlation 漂移对齐（校正束斑/样品热漂移）
+       对 cal 序列做整数像素 FFT 相位相关漂移对齐（校正束斑/样品热漂移）
   → ④ 叠加:
        stack = sigma-clipped mean(cal*)   参数: sigma(默认3), iters(默认3)
+       STACK_*.fits 存 float32（BITPIX=-32，不截断）   # v1.1
        （可选 median；报告被剔除像素比例）
   → ⑤ 灰度对比度拉伸（可选，仅用于查看弱斑）:
        linear / asinh / log；黑点白点可调（单色灰阶，无彩色 LUT）
-       → 16-bit FITS / TIFF 结果 + PNG 预览
+       → 8-bit PNG 预览 + 16-bit FITS 导出
 ```
 
 - 所有处理为**后台任务**：`POST /api/process/...` 返回 job_id，
-  进度经 WebSocket `/ws/jobs` 推送；支持取消
+  进度经 WebSocket `/ws/events` 推送；拍摄进行中提交处理任务返回 409
 - 叠加同时输出 QC 报告：帧数、总曝光时间、有效位深增益(≈log2√N bit)、
-  每帧背景 std、剔除统计
+  每帧背景 std、剔除统计、`excluded_counts`（各分组排除帧数）
 
 ### 5.5 API 一览
 
@@ -303,21 +313,19 @@ SESSION, NFRAME, STACKCNT=1, BITPIX=16(有效位12)
 | POST | /api/live/stop | 停止实时流 |
 | WS  | /ws/live | 推送 JPEG 帧 + 帧统计 JSON |
 | POST | /api/snapshot | 单帧抓拍（16-bit FITS/TIFF/PNG） |
-| POST | /api/capture/plan | 创建拍摄计划 |
+| POST | /api/capture/plan | 创建拍摄计划（phases 非空；含 exclude 能力见 api.md） |
 | POST | /api/capture/start | 开始执行 |
-| POST | /api/capture/pause | 暂停（阶段间隙） |
-| POST | /api/capture/resume | 继续 |
+| POST | /api/capture/resume | LIGHT 人工确认后继续（waiting_user 且 needs_user=true） |
 | POST | /api/capture/abort | 中止 |
-| GET | /api/capture/state | 当前进度/当前帧 |
+| GET | /api/capture/state | 当前进度/needs_user/prompt |
 | GET | /api/sessions | Session 列表 |
 | GET | /api/sessions/{id} | Session 详情（帧列表+QC） |
-| DELETE | /api/sessions/{id}/frames/{group}/{name} | 删除单帧（坏帧剔除） |
-| POST | /api/process/calibrate | 生成 masters 并标定（job） |
-| POST | /api/process/stack | 叠加（job，参数：method/sigma/registration） |
-| POST | /api/process/stretch | 拉伸导出预览/结果 |
+| POST | /api/process/calibrate | 生成 masters 并标定（job，支持 exclude） |
+| POST | /api/process/stack | 叠加（job，参数：method/sigma/registration/exclude） |
+| POST | /api/process/stretch | 拉伸导出 8-bit PNG 预览 + 16-bit FITS |
 | GET | /api/process/jobs/{id} | 任务状态与结果 |
-| WS  | /ws/jobs | 任务进度推送 |
-| GET | /api/files/{path} | 下载 FITS/TIFF/PNG |
+| WS  | /ws/events | capture/job 事件推送 |
+| GET | /api/files/{session_id}/{rel_path} | 下载 FITS/TIFF/PNG/meta.json（含 masters/calibrated） |
 
 ### 5.6 数据目录结构
 
@@ -405,13 +413,9 @@ data/
 **结论（维护性优先）**：
 
 1. **唯一 UI 代码库 = React Web SPA**，开发、调试、更新只维护这一套。
-2. Windows 上要“双击即用”：
-   - 先给 **PWA / Edge 应用模式**（零成本，桌面图标 + 无地址栏窗口）
-   - 如果确定需要真 exe（分发给别人、不想开浏览器），加一层
-     **pywebview 薄壳**：同进程启动 FastAPI 后端 + WebView2 窗口，
-     前端代码零改动，PyInstaller 打包成单文件。
-   - 后端本来就必须在 Windows/Linux 采集主机上运行，pywebview 壳与
-     后端同机部署时架构最顺。
+2. **已确认采用纯 Web 方案**（局域网浏览器访问），Windows exe 壳
+   （pywebview / Tauri）**不在本期计划内**；如未来有需要，pywebview 是
+   成本最低的补充项，架构无需改动。
 
 ---
 
@@ -430,10 +434,11 @@ data/
 
 ```
 创建 Plan → start
+每个 phase 开始前: waiting_user（中文 prompt；非 LIGHT needs_user=false，0.2s 后自动继续）
 phase[0] bias:  连续拍 N 张（最短曝光）
-phase[1] dark:  提示盖镜头盖 → 用户确认 → 连续拍 N 张（同 light 曝光）
-phase[2] flat:  提示撤盖/均匀照明 → 拍 N 张
-phase[3] light: 提示恢复衍射条件 → 拍 N 张
+phase[1] dark:  提示盖镜头盖 → 自动进入 capturing → 连续拍 N 张（同 light 曝光）
+phase[2] flat:  提示均匀照明 → 自动进入 capturing → 拍 N 张
+phase[3] light: 提示恢复衍射条件 + needs_user=true → 人工对照直方图确认 → resume → 拍 N 张
 每帧: 采集(12p→uint16) → 保存线程写 FITS + 缩略图 → 更新进度 WS
 ```
 
@@ -472,22 +477,25 @@ phase[3] light: 提示恢复衍射条件 → 拍 N 张
 | M2 | 序列拍摄 + FITS 存储 + 进度 | 一次跑完 bias/dark/flat/light 计划 |
 | M3 | 处理管线（master/标定/叠加） | 从 Session 一键出叠加结果 |
 | M4 | 配准、灰度对比度查看器、QC、导出、部署 | 完整可用 v1.0 |
-| M5（可选） | Windows pywebview 薄壳 + PyInstaller 打包 | 双击 exe 即用，复用同一前端 |
+| ~~M5~~ | ~~Windows pywebview 薄壳 + PyInstaller 打包~~ | **已取消**：确认纯 Web 方案 |
 
 ---
 
-## 10. 风险与待确认事项
+## 10. 风险与已确认决策
 
-**风险**
-- macOS 不能跑 ic4：采集后端必须部署在 Linux/Windows 主机（需确认现成机器）
+**已确认决策记录（2026-08-22）**
+
+| # | 决策项 | 结论 |
+|---|---|---|
+| 1 | 采集主机 | **Windows**（ic4 SDK 官方支持） |
+| 2 | 衍射来源 | **LEED 与 RHEED**；中心束过曝不做束挡/HDR 专门方案 |
+| 3 | Light 参数 | 拍摄 Light 前**人工对照实时预览+直方图确认参数**后开拍 |
+| 4 | 数据链 | **12-bit 链**：12-Bit Packed 传输 → uint16 内存 → 16-bit FITS 落盘（4.1） |
+| 5 | 前端形态 | **纯 Web 网页**（Windows exe 壳已取消，见 6.3） |
+| 6 | 访问范围 | **仅本机局域网**，无多用户/远程访问需求 |
+
+**剩余风险**
 - GigE 未开巨型帧/带宽不足 → 丢帧（后端统计并告警）
-- 中心束超亮导致 12-bit 饱和：需要束挡或 HDR 双曝光方案（待确认）
+- 中心束高亮饱和：由人工在 Light 确认环节判断是否可接受（已确认不做自动方案）
 - 无制冷：dark 需邻近时间拍摄，元数据记录温度
-
-**待你确认**
-1. 采集主机是什么系统/机器？（Linux 还是 Windows，还是需要我推荐）
-2. 衍射来源：TEM SAED、LEED、RHEED 还是其他？中心束有无束挡？
-3. 单张曝光大致范围（µs / ms / s 级）？单次实验需要多少张 light？
-4. 12-bit 数据链路方案（4.1：12p 传输 + uint16 处理 + 16-bit FITS 存储）是否认可？
-5. 前端形态：先按 6.3 用 Web SPA（PWA / Edge 应用模式），Windows exe 壳是否列入 M5？
-6. 前端只在本机局域网用，还是需要多用户/远程访问？
+- 真机 ic4 路径需在 Windows 采集主机上首次联调（开发机为 macOS，先以 Mock 相机开发）

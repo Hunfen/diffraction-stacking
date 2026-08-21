@@ -1,0 +1,364 @@
+# Diffraction Stacking — 前后端 API 契约 v1.1
+
+> 本文件是后端（FastAPI）与前端（React）之间的**唯一契约**。
+> 前后端必须严格按本文件实现；发现契约歧义时先报告船长，不得各自发挥。
+> 配套设计见 [architecture.md](architecture.md)。
+
+---
+
+## 1. 通用约定
+
+- 基础路径：`/api`（WebSocket 为 `/ws/live`、`/ws/events`）
+- 所有 REST 响应为 JSON，统一包裹结构：
+
+```json
+{ "ok": true, "data": <any>, "error": null }
+{ "ok": false, "data": null, "error": "<中文错误信息>" }
+```
+
+- `ok=false` 时 HTTP 状态码按语义给出：400（参数错误）、404（不存在）、409（状态冲突）、500（内部错误）
+- 500 响应统一返回 `error:"服务器内部错误"`，不泄漏内部异常细节
+- 时间格式：ISO 8601（`YYYY-MM-DDTHH:MM:SS`，本地时区，不带 Z）；FITS `DATE-OBS` 精确到毫秒（`YYYY-MM-DDTHH:MM:SS.mmm`）
+- 帧数据口径：相机 12-bit，内存 uint16，数值 ≤ 4095；FITS 16-bit 存储、数据在低 12 位
+- 文件下载接口 `GET /api/files/{session_id}/{rel_path}`：`rel_path` 允许 `meta.json`、`<group>/<file>`、`<group>/thumbs/<file>`、`results/<file>`；必须做路径穿越防护，非法路径返回 400
+  - `<group>` ∈ `bias|dark|flat|light`（含 `thumbs/` 子目录）；`masters/` 与 `calibrated/` 目录下的文件同样可直接访问（如 `masters/MASTER_DARK.fits`）
+
+---
+
+## 2. REST 端点
+
+### 2.1 健康与设备
+
+**GET /api/health**
+
+```json
+{ "ok": true, "data": { "status": "ok", "version": "0.1.0", "platform": "darwin", "camera_driver": "mock" }, "error": null }
+```
+
+`camera_driver`：`mock`（无 ic4 时）/ `ic4`（已加载 imagingcontrol4）。
+
+**GET /api/devices**
+
+```json
+{ "ok": true, "data": [
+  { "id": "mock-1", "name": "Mock LEED/RHEED Camera", "serial": "MOCK-0001",
+    "kind": "mock", "connected": false }
+], "error": null }
+```
+
+- mock 设备始终存在（真机 ic4 可用时追加 `kind:"ic4"` 设备，id 前缀 `ic4-`）
+- `connected` 指当前是否被本服务打开
+
+**POST /api/device/open** — body `{ "id": "mock-1" }`
+
+```json
+{ "ok": true, "data": { "id": "mock-1", "name": "Mock LEED/RHEED Camera",
+  "serial": "MOCK-0001", "connected": true }, "error": null }
+```
+
+- 打开新设备前自动关闭旧设备；ic4 设备在无驱动平台返回 `ok:false, error:"该平台无法加载 imagingcontrol4…"`
+
+**POST /api/device/close** — 无 body
+
+```json
+{ "ok": true, "data": { "connected": false }, "error": null }
+```
+
+**GET /api/device/info**
+
+```json
+{ "ok": true, "data": { "id": "mock-1", "name": "Mock LEED/RHEED Camera",
+  "serial": "MOCK-0001", "connected": true, "properties": [ <见 2.2> ] }, "error": null }
+```
+
+未打开设备时 `connected:false`、`properties:[]`。
+
+### 2.2 属性
+
+**GET /api/properties**
+
+```json
+{ "ok": true, "data": { "properties": [
+  { "name": "exposure", "label": "曝光", "value": 20000, "min": 30, "max": 30000000,
+    "step": 1, "unit": "us", "readonly": false, "type": "int" },
+  { "name": "gain", "label": "增益", "value": 0, "min": 0, "max": 48,
+    "step": 0.1, "unit": "dB", "readonly": false, "type": "float" },
+  { "name": "black_level", "label": "黑电平", "value": 0, "min": 0, "max": 255,
+    "step": 1, "unit": "ADU", "readonly": false, "type": "int" },
+  { "name": "reverse_x", "label": "水平镜像", "value": false, "readonly": false, "type": "bool" },
+  { "name": "reverse_y", "label": "垂直镜像", "value": false, "readonly": false, "type": "bool" },
+  { "name": "trigger_mode", "label": "触发模式", "value": false, "readonly": false, "type": "bool" },
+  { "name": "device_temperature", "label": "传感器温度", "value": 32.5, "min": 0, "max": 100,
+    "step": 0.1, "unit": "°C", "readonly": true, "type": "float" }
+], "error": null }
+```
+
+- 数值型属性必须有 `min/max/step/unit`；bool 型无 min/max；枚举型（若出现）带 `options`
+- ROI 通过 width/height/offset_x/offset_y 表达（若相机支持），mock 至少支持 width/height
+
+**PUT /api/properties/{name}** — body `{ "value": 50000 }`
+
+```json
+{ "ok": true, "data": { "name": "exposure", "value": 50000, "actual": 50000 }, "error": null }
+```
+
+- 越界值自动钳制到 min/max，`actual` 为相机实际生效值
+- 未打开设备返回 409
+
+### 2.3 实时预览与抓拍
+
+**POST /api/live/start** — body `{ "fps": 15, "scale": 1.0, "quality": 80 }`
+
+```json
+{ "ok": true, "data": { "streaming": true, "fps": 15, "scale": 1.0, "quality": 80 }, "error": null }
+```
+
+**POST /api/live/stop** — 无 body → `{ "ok": true, "data": { "streaming": false }, "error": null }`
+
+**WS /ws/live**（live start 后开始推送，可多客户端同时订阅）
+
+- 每条消息顺序固定：**先 1 条文本 JSON 统计，后 1 条二进制 JPEG**
+- 文本 JSON：
+
+```json
+{ "min": 0, "max": 4095, "mean": 180.2, "std": 42.1, "saturated_pct": 0.31,
+  "fps": 15.0, "histogram": [ <256 个 int> ] }
+```
+
+- `histogram` 为 **8-bit 预览图**的 256 bin 直方图（前后端显示口径一致）
+- JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=ROI×scale
+
+**POST /api/snapshot** — body `{ "format": "fits" }`（`fits`|`tiff`|`png`）
+
+```json
+{ "ok": true, "data": { "file": "SNP_20260822T10-00-00.fits",
+  "url": "/api/files/snapshots/SNP_20260822T10-00-00.fits" }, "error": null }
+```
+
+- 快照存 `data/snapshots/`，16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
+- 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`）
+- 未打开设备返回 409
+
+### 2.4 序列拍摄
+
+**POST /api/capture/plan** — body：
+
+```json
+{ "session_name": "LEED_Si111_001", "phases": [
+  { "type": "bias", "count": 50, "exposure_us": 30, "note": "" },
+  { "type": "dark", "count": 30, "exposure_us": null, "note": "与 light 同曝光" },
+  { "type": "flat", "count": 30, "exposure_us": null, "note": "束流散焦均匀照明" },
+  { "type": "light", "count": 100, "exposure_us": null, "note": "" }
+]}
+```
+
+- `exposure_us: null` = 沿用当前相机曝光；非 null = 该相位强制覆盖（拍摄时设置、相位结束不恢复）
+- `type` ∈ `bias|dark|flat|light`；`count` 1–10000；`phases` 不能为空（空数组返回 400）
+- 返回 `{ "ok": true, "data": { "plan_id": "...", "phases": [ ...校验后回显 ] }, "error": null }`
+- 拍摄中重新 plan 返回 409
+
+**POST /api/capture/start** — 无 body。要求已 plan 且设备已打开。
+
+```json
+{ "ok": true, "data": { "status": "running" }, "error": null }
+```
+
+**GET /api/capture/state**
+
+```json
+{ "ok": true, "data": {
+  "status": "waiting_user",
+  "session_name": "LEED_Si111_001",
+  "current_phase": { "type": "light", "index": 3, "total": 4 },
+  "frames_done": 110, "total_frames": 210,
+  "prompt": "请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light",
+  "message": "",
+  "needs_user": true,
+  "log": [ { "t": "2026-08-22T10:00:01", "msg": "BIAS 完成 50/50" } ]
+}, "error": null }
+```
+
+- `status` ∈ `idle|running|waiting_user|capturing|finished|aborted|error`
+- `needs_user`：当前相位是否需要人工确认。**所有相位开始前都会进入 `waiting_user` 并给出该相位 prompt**；
+  非 LIGHT 相位 `needs_user=false`，展示约 0.2s 后自动进入 `capturing`（prompt 转入 `message`）；
+  **LIGHT 相位 `needs_user=true`，必须 POST /api/capture/resume 才进入 `capturing`**
+- 未 plan 时 status=`idle`
+
+**POST /api/capture/resume** — 无 body。仅在 `waiting_user` 且 `needs_user=true` 时有效（LIGHT 人工确认）；其他状态返回 409。
+
+```json
+{ "ok": true, "data": { "status": "capturing" }, "error": null }
+```
+
+**POST /api/capture/abort** — 无 body。中止并保留已拍帧。
+
+```json
+{ "ok": true, "data": { "status": "aborted" }, "error": null }
+```
+
+进度与状态变化经 **WS /ws/events** 推送：
+
+```json
+{ "topic": "capture", "data": { "status": "...", "session_name": "...",
+  "current_phase": { "type": "light", "index": 3, "total": 4 },
+  "frames_done": 111, "total_frames": 210, "prompt": "...", "message": "...",
+  "needs_user": true } }
+```
+
+### 2.5 Session 与文件
+
+**GET /api/sessions**
+
+```json
+{ "ok": true, "data": [
+  { "id": "20260822T10-00-00_LEED_Si111_001", "name": "LEED_Si111_001",
+    "created": "2026-08-22T10:00:00",
+    "frame_counts": { "bias": 50, "dark": 30, "flat": 30, "light": 100 },
+    "has_results": false }
+], "error": null }
+```
+
+**GET /api/sessions/{id}**
+
+```json
+{ "ok": true, "data": {
+  "id": "20260822T10-00-00_LEED_Si111_001", "name": "LEED_Si111_001",
+  "created": "2026-08-22T10:00:00",
+  "phases": [ { "type": "bias", "count": 50, "exposure_us": 30, "note": "" } ],
+  "frames": {
+    "bias": [ { "file": "BIAS_0001.fits", "url": "/api/files/<id>/bias/BIAS_0001.fits",
+                "thumb": "/api/files/<id>/bias/thumbs/BIAS_0001.png",
+                "mean": 12.3, "std": 1.4, "saturated_pct": 0.0 } ]
+  },
+  "results": [ { "file": "STACK_sigma3.fits",
+                 "url": "/api/files/<id>/results/STACK_sigma3.fits",
+                 "preview": "/api/files/<id>/results/STACK_preview.png" } ],
+  "qc": { "...": "qc_report.json 内容（若存在）" }
+}, "error": null }
+```
+
+**GET /api/files/{session_id}/{rel_path}** — 文件下载/访问；`snapshots` 目录以 `session_id=snapshots` 表达。
+
+### 2.6 数据处理
+
+拍摄状态为 `running|waiting_user|capturing` 时提交任何处理任务返回 **409**。
+
+**POST /api/process/calibrate** — body `{ "session_id": "<id>", "sigma": 3, "method": "mean" }`
+
+可选字段 `exclude`（v1.1，按文件名排除坏帧，**仅匹配文件名、不含路径**）：
+
+```json
+{ "session_id": "<id>", "sigma": 3, "method": "mean",
+  "exclude": { "bias": ["BIAS_0003.fits"], "dark": [], "flat": [], "light": [] } }
+```
+
+- `exclude` 缺省或全空 = 不排除；组名只能 ∈ `bias|dark|flat|light`；数组内重复文件名后端去重
+- 排除的文件不存在时返回 **400**（中文错误）；calibrate 按组过滤后合成 master
+- job done 的 `result.excluded_counts` 为 `{bias,dark,flat,light}` 各分组排除计数
+
+```json
+{ "ok": true, "data": { "job_id": "job-abc123", "type": "calibrate", "status": "pending" }, "error": null }
+```
+
+**POST /api/process/stack** — body `{ "session_id": "<id>", "sigma": 3, "method": "mean", "registration": false }`
+
+同样支持可选 `exclude`（v1.1）；**stack 只过滤 `light`**，其余分组仅计入 `excluded_counts` 统计。job done 的 `result.excluded_counts` 与 `qc_report.json` 均含 `excluded_counts`。
+
+**POST /api/process/stretch** — body `{ "session_id": "<id>", "result_file": "STACK_sigma3.fits",
+"stretch": "asinh", "black": 0, "white": 4095 }`
+
+```json
+{ "ok": true, "data": { "job_id": "job-def456", "type": "stretch", "status": "pending" }, "error": null }
+```
+
+- `stretch` ∈ `linear|asinh|log`；输出覆盖 `results/STACK_preview.png`（8-bit PNG）；可另存 16-bit 导出
+- `STACK_*.fits` 为 **float32（BITPIX=-32）**，不做 uint16 截断（v1.1）
+
+**GET /api/process/jobs/{job_id}**
+
+```json
+{ "ok": true, "data": { "id": "job-abc123", "type": "calibrate",
+  "status": "running", "progress": 40, "message": "合成 master_dark (10/30)",
+  "result": null }, "error": null }
+```
+
+- `status` ∈ `pending|running|done|error`；done 时 `result` 为产物信息（文件/url/qc）
+
+**WS /ws/events** 推送 job 变化：
+
+```json
+{ "topic": "job", "data": { "id": "job-abc123", "type": "calibrate",
+  "status": "running", "progress": 40, "message": "..." } }
+```
+
+---
+
+## 3. 处理管线与文件格式
+
+### 3.1 磁盘布局
+
+```
+data/
+  snapshots/SNP_*.{fits,tiff,png}
+  captures/<时间戳>_<session_name>/
+    meta.json            # {name, created, phases[], camera{...}}
+    bias/  BIAS_0001.fits ...  + thumbs/BIAS_0001.png
+    dark/  DARK_0001.fits ...  + thumbs/DARK_0001.png
+    flat/  FLAT_0001.fits ...  + thumbs/FLAT_0001.png
+    light/ LIGHT_0001.fits ... + thumbs/LIGHT_0001.png
+    masters/  MASTER_BIAS.fits  MASTER_DARK.fits  MASTER_FLAT.fits
+    calibrated/ CAL_0001.fits ...
+    results/  STACK_sigma3.fits  STACK_preview.png  qc_report.json
+```
+
+### 3.2 FITS 头（每帧必填）
+
+```
+DATE-OBS   ISO 8601 毫秒      EXPOSURE   曝光 µs
+GAIN       dB                 BLACKLEV   黑电平 ADU
+TEMP       传感器温度 °C        FRAMETYP   BIAS|DARK|FLAT|LIGHT|SNAPSHOT
+CAMERA     'DMK 33GX249e'     SERIAL     序列号
+SESSION    session 名          NFRAME     帧序号
+BITPIX=16（有效位 12）
+```
+
+### 3.3 处理公式（实现口径统一）
+
+```
+master_bias = sigma_clipped_mean(bias*, σ=3, iter=3)   # bias* 为排除坏帧后的帧组
+master_dark = sigma_clipped_mean(dark*, σ=3, iter=3)
+flat_tmp    = mean(flat*)            # 若存在同曝光 dark 先减之
+master_flat = flat_tmp / median(flat_tmp)   # 中位数归一，median 为 0 时报错
+
+cal_i = (light_i - master_dark) / master_flat     # float32，负值截 0
+[可选] registration=true：对 cal_i 与 cal_0 做整数像素 FFT 相位相关，平移对齐
+stack = sigma_clipped_mean(cal*, σ=3, iter=3)     # method=mean；median 备用
+STACK_*.fits = float32（BITPIX=-32，不截断）        # v1.1
+preview = stretch(stack) → 8-bit PNG              # linear|asinh|log + black/white
+qc_report.json = { frames, total_exposure_us, effective_bits≈log2√N,
+                   rejected_pct, background_std, elapsed_s,
+                   excluded_counts: {bias,dark,flat,light} }
+```
+
+---
+
+## 4. Mock 相机行为规范（开发期真机替代）
+
+- 合成**静态 LEED/RHEED 衍射图案**：规则格点高斯斑（多级衍射点）+ 亮 00 斑 + 荧光屏背景辉光；uint16 数值 ≤ 4095
+- 噪声模型：读出噪声（高斯，~1.5 ADU）+ 泊松噪声（√signal）+ 固定热像素（约 0.05% 像素）
+- `exposure` 线性放大信号并放大泊松噪声；`gain` 倍乘信号与噪声；`black_level` 为加性偏置；三者均按 12-bit 截断
+- 默认 ROI 1024×768（可设 width/height 至 1920×1200），帧生成时间应满足 ≥10 fps
+- 温度随运行时间缓慢上升（室温 +0.05 °C/分钟，供 dark 匹配演示）
+- 支持可选的慢速图案漂移（每帧亚像素级），供 registration 功能演示
+- mock 帧率目标 30 fps 以上（1024×768 时），`trigger_mode=true` 时不自动出帧
+
+---
+
+## 5. 前端实现要点（与契约呼应）
+
+- axios 统一封装：解包 `{ok,data,error}`，`ok=false` → antd `message.error(error)`
+- WS 消息：`typeof data === 'string'` 解析 JSON；`data instanceof Blob/ArrayBuffer` 走图像路径
+- 所有图片/文件 URL 使用后端返回的 `url` 字段，**不自行拼接**
+- 后端地址：`/settings` 可配置（默认 `http://localhost:8000`，localStorage 持久化）；
+  dev 模式 vite 代理 `/api`、`/api/files`、`/ws`（ws:true）
+- 生产模式：FastAPI 将 `frontend/dist/` 挂载到 `/`，SPA 子路由 fallback 到 index.html
