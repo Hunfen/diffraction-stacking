@@ -1,0 +1,21 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Runtime data
+data/
+*.fits
+*.fit
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
