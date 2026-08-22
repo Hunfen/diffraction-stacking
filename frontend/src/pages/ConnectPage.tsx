@@ -84,7 +84,7 @@ export default function ConnectPage() {
     setActingId(id);
     try {
       await apiPost('/api/device/open', { id });
-      message.success('设备已打开');
+      message.success('Device opened');
       await Promise.all([refreshDevices(), refreshInfo()]);
     } finally {
       setActingId(null);
@@ -95,7 +95,7 @@ export default function ConnectPage() {
     setActingId('__close__');
     try {
       await apiPost('/api/device/close');
-      message.success('设备已关闭');
+      message.success('Device closed');
       await Promise.all([refreshDevices(), refreshInfo()]);
     } finally {
       setActingId(null);
@@ -107,15 +107,15 @@ export default function ConnectPage() {
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Card
-        title="设备列表"
+        title="Device List"
         extra={
           <Button icon={<ReloadOutlined />} onClick={() => void refreshDevices()} loading={loading}>
-            刷新
+            Refresh
           </Button>
         }
       >
         {devices.length === 0 && !loading ? (
-          <Empty description="未发现设备（后端服务是否已启动？）" />
+          <Empty description="No devices found (is the backend service running?)" />
         ) : (
           <List
             loading={loading}
@@ -132,7 +132,7 @@ export default function ConnectPage() {
                       loading={actingId === '__close__'}
                       onClick={() => void closeDevice()}
                     >
-                      关闭设备
+                      Close Device
                     </Button>
                   ) : (
                     <Button
@@ -142,7 +142,7 @@ export default function ConnectPage() {
                       loading={actingId === d.id}
                       onClick={() => void openDevice(d.id)}
                     >
-                      打开设备
+                      Open Device
                     </Button>
                   ),
                 ]}
@@ -155,17 +155,17 @@ export default function ConnectPage() {
                       <Tag color={d.kind === 'ic4' ? 'blue' : 'gold'}>{d.kind}</Tag>
                       <Badge
                         status={d.connected ? 'success' : 'default'}
-                        text={d.connected ? '已连接' : '未连接'}
+                        text={d.connected ? 'Connected' : 'Not connected'}
                       />
                     </Space>
                   }
                   description={
                     <Space direction="vertical" size={0}>
-                      <Text type="secondary">序列号：{d.serial}</Text>
-                      <Text type="secondary">ID：{d.id}</Text>
+                      <Text type="secondary">Serial: {d.serial}</Text>
+                      <Text type="secondary">ID: {d.id}</Text>
                       {d.kind === 'ic4' && (
                         <Text type="warning">
-                          真机 ic4 设备：需要 imagingcontrol4 驱动支持；无驱动平台打开将返回错误。
+                          Real ic4 device: requires imagingcontrol4 driver support; opening it on a platform without the driver will return an error.
                         </Text>
                       )}
                     </Space>
@@ -178,10 +178,10 @@ export default function ConnectPage() {
       </Card>
 
       <Card
-        title="当前设备信息"
+        title="Current Device Info"
         extra={
           <Button icon={<ReloadOutlined />} onClick={() => void refreshInfo()} loading={infoLoading}>
-            刷新
+            Refresh
           </Button>
         }
       >
@@ -189,30 +189,30 @@ export default function ConnectPage() {
           <Alert
             type="info"
             showIcon
-            message="尚未打开设备"
-            description={connectedDevice ? `设备「${connectedDevice.name}」未连接` : '请在上方打开一个设备开始使用实时预览与序列拍摄。'}
+            message="No Device Open"
+            description={connectedDevice ? `Device "${connectedDevice.name}" is not connected` : 'Open a device above to start using Live Preview and Capture.'}
           />
         ) : (
           <>
             <Title level={5}>{deviceInfo.name}</Title>
             <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="型号">{deviceInfo.name}</Descriptions.Item>
-              <Descriptions.Item label="序列号">{deviceInfo.serial}</Descriptions.Item>
-              <Descriptions.Item label="设备 ID">{deviceInfo.id}</Descriptions.Item>
-              <Descriptions.Item label="状态">
-                <Badge status="success" text="已连接" />
+              <Descriptions.Item label="Model">{deviceInfo.name}</Descriptions.Item>
+              <Descriptions.Item label="Serial">{deviceInfo.serial}</Descriptions.Item>
+              <Descriptions.Item label="Device ID">{deviceInfo.id}</Descriptions.Item>
+              <Descriptions.Item label="Status">
+                <Badge status="success" text="Connected" />
               </Descriptions.Item>
             </Descriptions>
-            <Typography.Title level={5}>属性摘要</Typography.Title>
+            <Typography.Title level={5}>Property Summary</Typography.Title>
             <Space wrap>
               {deviceInfo.properties.length === 0 ? (
-                <Text type="secondary">无属性信息</Text>
+                <Text type="secondary">No property info</Text>
               ) : (
                 deviceInfo.properties.map((p) => (
                   <Tag key={p.name} color={p.readonly ? 'default' : 'processing'}>
-                    {p.label}（{p.name}）= {String(p.value)}
+                    {p.label} ({p.name}) = {String(p.value)}
                     {p.unit ? ` ${p.unit}` : ''}
-                    {p.readonly ? ' · 只读' : ''}
+                    {p.readonly ? ' · Read-only' : ''}
                   </Tag>
                 ))
               )}

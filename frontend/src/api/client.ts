@@ -30,14 +30,14 @@ function extractErrorMessage(err: unknown): string {
       return body.error;
     }
     if (axiosErr.response.status === 409) {
-      return '操作与当前状态冲突（409）';
+      return 'Operation conflicts with the current state (409)';
     }
-    return `请求失败（HTTP ${axiosErr.response.status}）`;
+    return `Request failed (HTTP ${axiosErr.response.status})`;
   }
   if (axiosErr.code === 'ECONNABORTED') {
-    return '请求超时，请检查后端服务';
+    return 'Request timed out. Please check the backend service.';
   }
-  return '无法连接到后端服务，请检查后端地址与服务状态';
+  return 'Cannot connect to the backend. Please check the backend address and service status.';
 }
 
 const instance = axios.create({
@@ -51,7 +51,7 @@ instance.interceptors.response.use(
     const silent = Boolean((response.config as ApiRequestConfig).silent);
     if (body && typeof body === 'object' && 'ok' in body) {
       if (!body.ok) {
-        const errText = body.error || '请求失败';
+        const errText = body.error || 'Request failed';
         if (!silent) message.error(errText);
         return Promise.reject(new ApiError(errText, response.status));
       }

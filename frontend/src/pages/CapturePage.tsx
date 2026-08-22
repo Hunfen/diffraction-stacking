@@ -50,13 +50,13 @@ import type {
   SessionSummary,
 } from '../api/types';
 
-const LIGHT_CONFIRM_HINT = '请对照实时直方图人工确认参数';
+const LIGHT_CONFIRM_HINT = 'Please check the live histogram to manually confirm the parameters';
 
 const PHASE_LABELS: Record<PhaseType, string> = {
-  bias: '偏置场（Bias）',
-  dark: '暗场（Dark）',
-  flat: '平场（Flat）',
-  light: '亮场（Light）',
+  bias: 'Bias',
+  dark: 'Dark',
+  flat: 'Flat',
+  light: 'Light',
 };
 
 const DEFAULT_TEMPLATE: Omit<CapturePhasePlan, 'note'>[] = [
@@ -189,9 +189,9 @@ export default function CapturePage() {
         key: nextKey(),
         note:
           i === 1
-            ? '与 light 同曝光'
+            ? 'Same exposure as light'
             : i === 2
-              ? '束流散焦均匀照明'
+              ? 'Defocused beam for uniform illumination'
               : '',
       })),
     );
@@ -214,11 +214,11 @@ export default function CapturePage() {
 
   const startCapture = async () => {
     if (rows.length === 0) {
-      message.warning('请至少添加一个相位');
+      message.warning('Please add at least one phase');
       return;
     }
     if (rows.some((r) => !r.type || !Number.isFinite(r.count) || r.count < 1 || r.count > 10000)) {
-      message.warning('每个相位的张数必须是 1–10000 的整数');
+      message.warning('The frame count for each phase must be an integer between 1 and 10000');
       return;
     }
     const name = sessionName.trim();
@@ -271,7 +271,7 @@ export default function CapturePage() {
 
   const columns: ColumnsType<PhaseRow> = [
     {
-      title: '类型',
+      title: 'Type',
       dataIndex: 'type',
       width: 180,
       render: (_, row) => (
@@ -287,7 +287,7 @@ export default function CapturePage() {
       ),
     },
     {
-      title: '张数',
+      title: 'Frames',
       dataIndex: 'count',
       width: 120,
       render: (_, row) => (
@@ -304,7 +304,7 @@ export default function CapturePage() {
       ),
     },
     {
-      title: '曝光覆盖（µs）',
+      title: 'Exposure Override (µs)',
       dataIndex: 'exposure_us',
       width: 160,
       render: (_, row) => (
@@ -312,25 +312,25 @@ export default function CapturePage() {
           min={1}
           max={30000000}
           value={row.exposure_us}
-          placeholder="沿用当前"
+          placeholder="Keep current"
           style={{ width: '100%' }}
           onChange={(v) => updateRow(row.key, { exposure_us: v })}
         />
       ),
     },
     {
-      title: '说明',
+      title: 'Note',
       dataIndex: 'note',
       render: (_, row) => (
         <Input
           value={row.note}
-          placeholder="相位说明（可选）"
+          placeholder="Phase note (optional)"
           onChange={(e) => updateRow(row.key, { note: e.target.value })}
         />
       ),
     },
     {
-      title: '操作',
+      title: 'Actions',
       width: 160,
       render: (_, row, index) => (
         <Space>
@@ -365,13 +365,13 @@ export default function CapturePage() {
   const total = captureState.total_frames || totalFrames;
   const progressPct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
   const currentPhaseLabel = captureState.current_phase
-    ? `${PHASE_LABELS[captureState.current_phase.type]}（第 ${captureState.current_phase.index + 1}/${captureState.current_phase.total} 个相位）`
+    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index + 1}/${captureState.current_phase.total})`
     : '—';
 
   const modalPrompt = useMemo(() => {
-    const prompt = captureState.prompt || '请确认当前拍摄条件，然后继续。';
+    const prompt = captureState.prompt || 'Please confirm the current capture conditions, then continue.';
     if (captureState.current_phase?.type === 'light' && !prompt.includes(LIGHT_CONFIRM_HINT)) {
-      return `${prompt}\n\n${LIGHT_CONFIRM_HINT}：请对照实时预览与直方图确认曝光/增益/黑电平参数后继续。`;
+      return `${prompt}\n\n${LIGHT_CONFIRM_HINT}: please verify exposure/gain/black-level against the live preview and histogram before continuing.`;
     }
     return prompt;
   }, [captureState.prompt, captureState.current_phase]);
@@ -381,27 +381,27 @@ export default function CapturePage() {
   const blockingModal = isBlockingWaiting(captureState);
   const preparingWithoutUser = isPreparingWaiting(captureState);
   const preparingPhaseLabel = captureState.current_phase
-    ? `${PHASE_LABELS[captureState.current_phase.type]}（第 ${captureState.current_phase.index + 1}/${captureState.current_phase.total} 个相位）`
-    : '当前相位';
+    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index + 1}/${captureState.current_phase.total})`
+    : 'Current phase';
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Card size="small" title="拍摄计划">
+      <Card size="small" title="Capture Plan">
         <Form layout="vertical">
           <Row gutter={16}>
             <Col xs={24} md={8}>
               <Form.Item
-                label="Session 名称"
+                label="Session name"
                 required
                 extra={
                   <Typography.Text type="secondary">
-                    将自动添加时间戳前缀（YYYYMMDDTHH-MM-SS_）
+                    A timestamp prefix (YYYYMMDDTHH-MM-SS_) will be added automatically
                   </Typography.Text>
                 }
               >
                 <Input
                   value={sessionName}
-                  placeholder="留空使用 session"
+                  placeholder="Leave empty to use 'session'"
                   onChange={(e) => setSessionName(e.target.value)}
                 />
               </Form.Item>
@@ -409,9 +409,9 @@ export default function CapturePage() {
           </Row>
         </Form>
         <Space wrap style={{ marginBottom: 12 }}>
-          <Button onClick={applyTemplate}>默认衍射套装（bias×50, dark×30, flat×30, light×100）</Button>
+          <Button onClick={applyTemplate}>Default Diffraction Set (bias × 50, dark × 30, flat × 30, light × 100)</Button>
           <Button icon={<PlusOutlined />} disabled={active} onClick={() => setRows((prev) => [...prev, newRow()])}>
-            添加相位
+            Add Phase
           </Button>
         </Space>
         <Table<PhaseRow>
@@ -420,12 +420,12 @@ export default function CapturePage() {
           columns={columns}
           dataSource={rows}
           pagination={false}
-          locale={{ emptyText: '暂无相位，请点击「默认衍射套装」或「添加相位」' }}
+          locale={{ emptyText: 'No phases yet. Click "Default Diffraction Set" or "Add Phase".' }}
           scroll={{ x: 900 }}
         />
         <Space style={{ marginTop: 12 }}>
           <Typography.Text type="secondary">
-            总帧数：{totalFrames}（exposure_us 留空 = 沿用当前相机曝光；非空 = 相位开始前强制覆盖）
+            Total frames: {totalFrames} (blank exposure_us = keep the current camera exposure; non-blank = force override before the phase starts)
           </Typography.Text>
         </Space>
         <div style={{ marginTop: 12 }}>
@@ -437,7 +437,7 @@ export default function CapturePage() {
             disabled={active || rows.length === 0}
             onClick={() => void startCapture()}
           >
-            启动序列拍摄
+            Start Capture Sequence
           </Button>
         </div>
         {effectiveSessionName && (
@@ -445,8 +445,8 @@ export default function CapturePage() {
             style={{ marginTop: 12 }}
             type="success"
             showIcon
-            message={`本次 Session 名称：${effectiveSessionName}`}
-            description="该名称为后端创建计划后返回的最终名称（含时间戳前缀），后续进度与完成提示均以此为准。"
+            message={`Session name for this run: ${effectiveSessionName}`}
+            description="This is the final name returned by the backend after the plan is created (with a timestamp prefix). All subsequent progress and completion messages use this name."
           />
         )}
       </Card>
@@ -456,7 +456,7 @@ export default function CapturePage() {
           size="small"
           title={
             <Space>
-              执行状态
+              Execution Status
               <Tag color={captureState.status === 'error' ? 'error' : 'processing'}>
                 {captureState.status}
               </Tag>
@@ -465,9 +465,9 @@ export default function CapturePage() {
         >
           <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
             <Descriptions.Item label="Session">{sessionDisplayName}</Descriptions.Item>
-            <Descriptions.Item label="当前相位">{currentPhaseLabel}</Descriptions.Item>
-            <Descriptions.Item label="当前帧">{done}</Descriptions.Item>
-            <Descriptions.Item label="总帧数">{total}</Descriptions.Item>
+            <Descriptions.Item label="Current Phase">{currentPhaseLabel}</Descriptions.Item>
+            <Descriptions.Item label="Current Frame">{done}</Descriptions.Item>
+            <Descriptions.Item label="Total Frames">{total}</Descriptions.Item>
           </Descriptions>
           <Progress
             percent={progressPct}
@@ -480,7 +480,7 @@ export default function CapturePage() {
               type="info"
               showIcon
               banner
-              message={`正在准备拍摄 ${preparingPhaseLabel}…（无需人工确认，不显示继续按钮）`}
+              message={`Preparing to capture ${preparingPhaseLabel}… (no manual confirmation required; the Continue button is not shown)`}
               description={captureState.prompt || undefined}
             />
           )}
@@ -492,36 +492,36 @@ export default function CapturePage() {
               showIcon
               message={
                 captureState.status === 'finished'
-                  ? `序列拍摄已完成（本次 Session 名称：${sessionDisplayName}）`
+                  ? `Capture sequence finished (Session: ${sessionDisplayName})`
                   : captureState.status === 'aborted'
-                    ? `已中止（已拍帧保留，Session：${sessionDisplayName}）`
-                    : `拍摄出错：${captureState.message || '未知错误'}`
+                    ? `Aborted (captured frames kept, Session: ${sessionDisplayName})`
+                    : `Capture error: ${captureState.message || 'Unknown error'}`
               }
               action={
                 <Button size="small" type="primary" onClick={() => navigate('/processing')}>
-                  去处理数据 →
+                  Go to Processing →
                 </Button>
               }
             />
           )}
           <Popconfirm
-            title="确认中止拍摄？"
-            description="已拍摄的帧会保留，不会删除。"
-            okText="中止"
-            cancelText="取消"
+            title="Abort capture?"
+            description="Frames already captured will be kept and will not be deleted."
+            okText="Abort"
+            cancelText="Cancel"
             onConfirm={() => void abortCapture()}
           >
             <Button danger icon={<StopOutlined />} style={{ marginTop: 12 }} disabled={!active}>
-              中止拍摄（保留已拍帧）
+              Abort Capture (Keep Captured Frames)
             </Button>
           </Popconfirm>
         </Card>
       )}
 
       {(thumbs.length > 0 || captureState.session_name) && (
-        <Card size="small" title={`最新帧缩略图（最近 ${thumbs.length} 帧，自动刷新）`}>
+        <Card size="small" title={`Latest Frame Thumbnails (last ${thumbs.length} frames, auto-refresh)`}>
           {thumbs.length === 0 ? (
-            <Empty description="暂无缩略图（帧写入后自动出现）" />
+            <Empty description="No thumbnails yet (they appear automatically as frames are written)" />
           ) : (
             <Image.PreviewGroup>
               <Space wrap size={4}>
@@ -545,8 +545,8 @@ export default function CapturePage() {
       <Modal
         title={
           captureState.current_phase
-            ? `${PHASE_LABELS[captureState.current_phase.type]} — 请确认（需人工继续）`
-            : '请确认（需人工继续）'
+            ? `${PHASE_LABELS[captureState.current_phase.type]} — Confirmation Required (Manual Continue)`
+            : 'Confirmation Required (Manual Continue)'
         }
         open={blockingModal}
         closable={false}
@@ -554,13 +554,13 @@ export default function CapturePage() {
         keyboard={false}
         footer={[
           <Button key="continue" type="primary" loading={resumeBusy} onClick={() => void resumeCapture()}>
-            继续
+            Continue
           </Button>,
         ]}
       >
         <Typography.Paragraph style={{ whiteSpace: 'pre-line' }}>{modalPrompt}</Typography.Paragraph>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          点击「继续」调用 POST /api/capture/resume 继续当前相位。
+          Click "Continue" to call POST /api/capture/resume and continue the current phase.
         </Typography.Text>
       </Modal>
     </Space>

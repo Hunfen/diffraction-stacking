@@ -1,6 +1,7 @@
-# Diffraction Stacking
+# Static AstroPhoto
 
-An acquisition and processing system for **static LEED / RHEED electron diffraction spots**.
+**Static AstroPhoto** is an acquisition and processing system (Diffraction Stacking) for
+**static LEED / RHEED electron diffraction spots**.
 It borrows the deep-sky astrophotography workflow — **Bias / Dark / Flat calibration + multi-frame sigma stacking** —
 to improve SNR and dynamic range of faint diffraction spots. The target is static, so **no equatorial mount,
 guiding, or de-rotation** is needed.
@@ -75,6 +76,8 @@ flowchart LR
 │       ├── api/            # axios wrapper, WS clients, types, state machine
 │       └── pages/          # Connect / Live / Capture / Processing / Settings
 ├── scripts/
+│   ├── install.sh          # one-command installer (macOS / Linux / WSL, idempotent)
+│   ├── install.ps1         # one-command installer (Windows PowerShell; -WithCamera adds real-camera deps)
 │   └── backend_smoke.py    # end-to-end backend self-test (Mock full workflow)
 ├── docs/
 │   ├── architecture.md     # architecture design v0.3
@@ -91,61 +94,65 @@ flowchart LR
 
 | Use case | Requirement |
 |---|---|
+| Installer | Python ≥ 3.10 (3.12 / 3.11 preferred, must be able to create a venv) + Node.js ≥ 20 with npm |
 | Backend (real camera) | Windows 10/11 + Python 3.10+ (3.12 recommended) + ic4 driver |
-| Backend (development) | macOS / Linux + Python 3.12 (Mock camera is used automatically) |
-| Frontend | Node.js ≥ 20 (22+ recommended) with npm |
+| Backend (development) | macOS / Linux / WSL + Python 3.12 (Mock camera is used automatically) |
+| Frontend | Node.js ≥ 20 (22+ recommended) with npm (dependencies are installed and built by the installer) |
 | Camera | DMK 33GX249e (optional — every feature works with the Mock camera) |
 
 ### 1. Clone
 
 ```bash
-git clone <your-repo-url> diffraction-stacking
-cd diffraction-stacking
+git clone <your-repo-url> static-astrophoto
+cd static-astrophoto
 ```
 
-### 2. Backend
+### 2. One-command install (right after cloning)
 
-macOS / Linux (Mock development mode):
+macOS / Linux / WSL:
+
+```bash
+./scripts/install.sh
+```
+
+Windows PowerShell (Mock mode; add `-WithCamera` to install the imagingcontrol4 bindings):
+
+```powershell
+.\scripts\install.ps1
+.\scripts\install.ps1 -WithCamera   # real-camera mode
+```
+
+The installer is idempotent and safe to re-run. It will:
+
+1. auto-select Python (3.12 / 3.11 preferred, ≥ 3.10 required), create `backend/.venv`,
+   upgrade pip, and install `backend/requirements.txt` (an existing usable venv is reused without reinstalling);
+2. detect Node.js / npm, run `npm install` (with cache-repair hints on cache errors) and `npm run build` in `frontend/`;
+3. create the `data/snapshots` and `data/captures` directories.
+
+> Optional frontend development: `cd frontend && npm run dev` starts Vite (http://localhost:5173),
+> proxying `/api` and `/ws` to `http://localhost:8000`.
+
+### 3. Start
+
+macOS / Linux / WSL (Mock camera):
 
 ```bash
 cd backend
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Windows (real DMK 33GX249e):
+Windows:
 
 ```powershell
 cd backend
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install imagingcontrol4        # official ic4 Python bindings
 .venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+Open **http://localhost:8000** in your browser (the installer has already built the frontend;
+FastAPI serves `frontend/dist/` directly).
+
 > Real-camera prerequisites: install The Imaging Source ic4 driver and bind the GigE NIC;
 > enable Jumbo Frames (9000 MTU) where possible. See [backend/README.md](backend/README.md).
-
-### 3. Frontend
-
-Development mode (HMR; Vite proxies `/api` and `/ws` to `http://localhost:8000`):
-
-```bash
-cd frontend
-npm install
-npm run dev      # http://localhost:5173
-```
-
-Production mode (built assets served by FastAPI on a single port):
-
-```bash
-cd frontend
-npm install
-npm run build    # output in frontend/dist/
-# restart the backend, then open http://<host>:8000
-```
 
 ### 4. Workflow
 

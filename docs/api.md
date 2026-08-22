@@ -13,12 +13,13 @@
 
 ```json
 { "ok": true, "data": <any>, "error": null }
-{ "ok": false, "data": null, "error": "<中文错误信息>" }
+{ "ok": false, "data": null, "error": "<English error message>" }
 ```
 
 - `ok=false` 时 HTTP 状态码按语义给出：400（参数错误）、404（不存在）、409（状态冲突）、
   500（内部错误）、503（依赖不可用，如平台无法加载 imagingcontrol4）
-- 500 响应统一返回 `error:"服务器内部错误"`，不泄漏内部异常细节
+- **所有 `error` 与 `prompt` 文案均为英文**（数据类字段如 session/folder 名称不受此限制）
+- 500 响应统一返回 `error:"Internal server error"`，不泄漏内部异常细节
 - 时间格式：ISO 8601（`YYYY-MM-DDTHH:MM:SS`，本地时区，不带 Z）；FITS `DATE-OBS` 精确到毫秒（`YYYY-MM-DDTHH:MM:SS.mmm`）
 - 帧数据口径：相机 12-bit，内存 uint16，数值 ≤ 4095；FITS 16-bit 存储、数据在低 12 位
 - 数据目录（v1.2）：所有运行时文件统一落在 `data_root` 下（`snapshots/`、`captures/`）。
@@ -51,9 +52,9 @@
 { "ok": true, "data": { "data_root": "/abs/path/to/data", "writable": true }, "error": null }
 ```
 
-- 校验：`data_root` 必须是非空绝对路径，否则 **400**（中文错误）
+- 校验：`data_root` 必须是非空绝对路径，否则 **400**（英文错误）
 - `data_root` 不存在时自动创建 `data_root`、`data_root/snapshots/`、`data_root/captures/`；
-  创建失败返回 **400**（中文错误）
+  创建失败返回 **400**（英文错误）
 - 成功返回新的 `{data_root, writable}`，并**立即生效**：CaptureService、session 扫描、
   snapshot、处理管线每次读写都通过动态 `data_root` 访问器读取当前值（不得启动时一次性固化）
 - 持久化到 `backend/.data_root.json`（内容 `{"data_root": "<绝对路径>"}`，已加入 `.gitignore`）；
@@ -88,7 +89,7 @@
   "serial": "MOCK-0001", "connected": true }, "error": null }
 ```
 
-- 打开新设备前自动关闭旧设备；ic4 设备在无驱动平台返回 `ok:false, error:"该平台无法加载 imagingcontrol4…"`
+- 打开新设备前自动关闭旧设备；ic4 设备在无驱动平台返回 `ok:false, error:"Unable to load imagingcontrol4…"`
 
 **POST /api/device/close** — 无 body
 
@@ -111,16 +112,16 @@
 
 ```json
 { "ok": true, "data": { "properties": [
-  { "name": "exposure", "label": "曝光", "value": 20000, "min": 30, "max": 30000000,
+  { "name": "exposure", "label": "Exposure", "value": 20000, "min": 30, "max": 30000000,
     "step": 1, "unit": "us", "readonly": false, "type": "int" },
-  { "name": "gain", "label": "增益", "value": 0, "min": 0, "max": 48,
+  { "name": "gain", "label": "Gain", "value": 0, "min": 0, "max": 48,
     "step": 0.1, "unit": "dB", "readonly": false, "type": "float" },
-  { "name": "black_level", "label": "黑电平", "value": 0, "min": 0, "max": 255,
+  { "name": "black_level", "label": "Black Level", "value": 0, "min": 0, "max": 255,
     "step": 1, "unit": "ADU", "readonly": false, "type": "int" },
-  { "name": "reverse_x", "label": "水平镜像", "value": false, "readonly": false, "type": "bool" },
-  { "name": "reverse_y", "label": "垂直镜像", "value": false, "readonly": false, "type": "bool" },
-  { "name": "trigger_mode", "label": "触发模式", "value": false, "readonly": false, "type": "bool" },
-  { "name": "device_temperature", "label": "传感器温度", "value": 32.5, "min": 0, "max": 100,
+  { "name": "reverse_x", "label": "Reverse X", "value": false, "readonly": false, "type": "bool" },
+  { "name": "reverse_y", "label": "Reverse Y", "value": false, "readonly": false, "type": "bool" },
+  { "name": "trigger_mode", "label": "Trigger Mode", "value": false, "readonly": false, "type": "bool" },
+  { "name": "device_temperature", "label": "Sensor Temperature", "value": 32.5, "min": 0, "max": 100,
     "step": 0.1, "unit": "°C", "readonly": true, "type": "float" }
 ], "error": null }
 ```
@@ -164,7 +165,7 @@
 
 - `format` ∈ `fits`|`tiff`|`png`（缺省 `fits`）
 - `folder`（v1.3）：可选，相对子目录名；缺省/空 → 存 `<data_root>/snapshots/`，
-  非空 → 存 `<data_root>/snapshots/<folder>/`，目录不存在时自动创建（创建失败返回 **400** 中文错误）
+  非空 → 存 `<data_root>/snapshots/<folder>/`，目录不存在时自动创建（创建失败返回 **400** 英文错误）
 
 ```json
 { "ok": true, "data": { "file": "SNP_20260822T10-00-00.fits",
@@ -173,7 +174,7 @@
 ```
 
 - folder 缺省/空时返回 `folder:""`、`url` 为 `/api/files/snapshots/<file>`
-- **folder 路径防护**（v1.3）：仅允许单段相对子目录名。以下情况返回 **400**（中文错误）：
+- **folder 路径防护**（v1.3）：仅允许单段相对子目录名。以下情况返回 **400**（英文错误）：
   绝对路径（如 `/abs`）、`..`/`.` 段、路径分隔符 `/` `\`（如 `a/b`、`../evil`）、
   Windows 非法字符 `< > : " | ? *`（与 `sanitize` 口径一致，本接口选择直接拒绝）
 - 快照 16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
@@ -245,10 +246,10 @@
   "session_name": "20260822T10-00-00_LEED_Si111_001",
   "current_phase": { "type": "light", "index": 3, "total": 4 },
   "frames_done": 110, "total_frames": 210,
-  "prompt": "请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light",
+  "prompt": "Restore normal diffraction conditions. Check the exposure/gain parameters against the live preview and histogram, then confirm to start the continuous Light capture",
   "message": "",
   "needs_user": true,
-  "log": [ { "t": "2026-08-22T10:00:01", "msg": "BIAS 完成 50/50" } ]
+  "log": [ { "t": "2026-08-22T10:00:01", "msg": "BIAS done 50/50" } ]
 }, "error": null }
 ```
 
@@ -337,7 +338,7 @@
 ```
 
 - `exclude` 缺省或全空 = 不排除；组名只能 ∈ `bias|dark|flat|light`；数组内重复文件名后端去重
-- 排除的文件不存在时返回 **400**（中文错误）；calibrate 按组过滤后合成 master
+- 排除的文件不存在时返回 **400**（英文错误）；calibrate 按组过滤后合成 master
 - job done 的 `result.excluded_counts` 为 `{bias,dark,flat,light}` 各分组排除计数
 
 ```json
@@ -362,7 +363,7 @@
 
 ```json
 { "ok": true, "data": { "id": "job-abc123", "type": "calibrate",
-  "status": "running", "progress": 40, "message": "合成 master_dark (10/30)",
+  "status": "running", "progress": 40, "message": "Synthesizing master_dark (30 frames)",
   "result": null }, "error": null }
 ```
 

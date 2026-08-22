@@ -40,10 +40,10 @@ import type {
 } from '../api/types';
 
 const PHASE_LABELS: Record<PhaseType, string> = {
-  bias: '偏置场 Bias',
-  dark: '暗场 Dark',
-  flat: '平场 Flat',
-  light: '亮场 Light',
+  bias: 'Bias',
+  dark: 'Dark',
+  flat: 'Flat',
+  light: 'Light',
 };
 
 const PHASE_EN_LABELS: Record<PhaseType, string> = {
@@ -56,16 +56,16 @@ const PHASE_EN_LABELS: Record<PhaseType, string> = {
 const ALL_PHASE_TYPES: PhaseType[] = ['bias', 'dark', 'flat', 'light'];
 
 const JOB_TYPE_LABELS: Record<JobEventData['type'], string> = {
-  calibrate: '标定（Master 合成）',
-  stack: '叠加',
-  stretch: '重标定预览',
+  calibrate: 'Calibrate (Master Build)',
+  stack: 'Stack',
+  stretch: 'Rescale Preview',
 };
 
 const JOB_STATUS_META: Record<JobEventData['status'], { color: string; text: string }> = {
-  pending: { color: 'default', text: '排队中' },
-  running: { color: 'processing', text: '运行中' },
-  done: { color: 'success', text: '完成' },
-  error: { color: 'error', text: '失败' },
+  pending: { color: 'default', text: 'Queued' },
+  running: { color: 'processing', text: 'Running' },
+  done: { color: 'success', text: 'Done' },
+  error: { color: 'error', text: 'Failed' },
 };
 
 /** 只轮询合法 job_id，避免 undefined 之类的幽灵 id 打 GET /api/process/jobs/undefined */
@@ -320,7 +320,7 @@ export default function ProcessingPage() {
 
   const runCalibrate = async () => {
     if (!selectedId) {
-      message.warning('请先选择 Session');
+      message.warning('Please select a Session first');
       return;
     }
     setCalSubmitting(true);
@@ -334,7 +334,7 @@ export default function ProcessingPage() {
       // 提交响应字段是 job_id，立即归一成 JobEventData 写入 jobs，避免幽灵 pending 行
       const event = toJobEvent(job);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
-      message.success(`已提交标定任务 ${job.job_id}（exclude 共 ${excludedCountTotal} 帧）`);
+      message.success(`Calibrate job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
     } finally {
       setCalSubmitting(false);
     }
@@ -342,7 +342,7 @@ export default function ProcessingPage() {
 
   const runStack = async () => {
     if (!selectedId) {
-      message.warning('请先选择 Session');
+      message.warning('Please select a Session first');
       return;
     }
     setStackSubmitting(true);
@@ -356,7 +356,7 @@ export default function ProcessingPage() {
       });
       const event = toJobEvent(job);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
-      message.success(`已提交叠加任务 ${job.job_id}（exclude 共 ${excludedCountTotal} 帧）`);
+      message.success(`Stack job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
     } finally {
       setStackSubmitting(false);
     }
@@ -364,7 +364,7 @@ export default function ProcessingPage() {
 
   const runStretch = async () => {
     if (!selectedId || !selectedResult) {
-      message.warning('请选择要重标定的结果文件');
+      message.warning('Please select a result file to rescale');
       return;
     }
     // Bug A 修复 (a)：提交时立即自增 ?v=，即使 WS/轮询事件丢失，图片也会先强制刷新一次；
@@ -422,15 +422,15 @@ export default function ProcessingPage() {
   // 步骤条 current：calibrate 完成后进入 Stack 步；stack 完成后进入 Stretch 步；stretch 完成则全部完成
   const stepCurrent = stretchDone ? 3 : stackDone ? 2 : calibrateDone ? 1 : 0;
   const stackHint = !calibrateDone
-    ? '请先完成步骤 1 · Construct Bias/Dark/Flat Master & Calibrate，再运行 Stack。'
+    ? 'Complete Step 1 · Construct Bias/Dark/Flat Master & Calibrate before running Stack.'
     : stackActive
-      ? 'Stack 任务运行中…'
-      : 'Calibrate 已完成，建议运行 Stack。';
+      ? 'Stack job running…'
+      : 'Calibrate completed. You can now run Stack.';
   const stretchHint = !stackDone
-    ? '请先完成步骤 2 · Stacking Light Field，再运行 Rescale。'
+    ? 'Complete Step 2 · Stacking Light Field before running Rescale.'
     : stretchActive
-      ? 'Rescale 任务运行中…'
-      : 'Stack 已完成，可以应用 Rescale 并刷新预览。';
+      ? 'Rescale job running…'
+      : 'Stack completed. You can apply Rescale and refresh the preview.';
 
   const selectedResultInfo = detail?.results.find((r) => r.file === selectedResult) ?? null;
   const previewUrl = selectedResultInfo
@@ -441,17 +441,17 @@ export default function ProcessingPage() {
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Card
         size="small"
-        title="Session 选择"
+        title="Session Selection"
         extra={
           <Button icon={<ReloadOutlined />} loading={sessionsLoading} onClick={() => void loadSessions()}>
-            刷新列表
+            Refresh List
           </Button>
         }
       >
         <Space wrap>
           <Select
             style={{ minWidth: 420 }}
-            placeholder="选择 Session"
+            placeholder="Select a Session"
             loading={sessionsLoading}
             value={selectedId}
             onChange={(v) => {
@@ -462,20 +462,20 @@ export default function ProcessingPage() {
               value: s.id,
               label: `${s.id}`,
             }))}
-            notFoundContent={<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Session" />}
+            notFoundContent={<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No sessions yet" />}
           />
           {sessions.map((s) => (
             <Tag key={s.id} color={s.has_results ? 'green' : 'default'}>
               {s.name} · bias {s.frame_counts.bias ?? 0} / dark {s.frame_counts.dark ?? 0} / flat {s.frame_counts.flat ?? 0} / light {s.frame_counts.light ?? 0}
-              {s.has_results ? ' · 有结果' : ''}
+              {s.has_results ? ' · has results' : ''}
             </Tag>
           ))}
         </Space>
         {detail && (
           <Descriptions size="small" column={3} style={{ marginTop: 12 }}>
-            <Descriptions.Item label="名称">{detail.name}</Descriptions.Item>
-            <Descriptions.Item label="创建时间">{detail.created}</Descriptions.Item>
-            <Descriptions.Item label="纳入处理帧数（未勾选将进 exclude）">
+            <Descriptions.Item label="Name">{detail.name}</Descriptions.Item>
+            <Descriptions.Item label="Created">{detail.created}</Descriptions.Item>
+            <Descriptions.Item label="Frames Included in Processing (unchecked go to exclude)">
               {availableFrames} / {detail.phases.reduce((a, p) => a + p.count, 0)}
             </Descriptions.Item>
           </Descriptions>
@@ -484,11 +484,11 @@ export default function ProcessingPage() {
 
       <Card
         size="small"
-        title="帧列表（勾选 = 纳入处理；未勾选帧将进入对应相位的 exclude 数组随 calibrate/stack 提交，不会删除文件）"
+        title="Frame List (check = include in processing; unchecked frames go into the exclude array of their phase and are submitted with calibrate/stack — files are never deleted)"
         loading={detailLoading}
       >
         {!detail ? (
-          <Empty description="选择 Session 后显示各相位帧" />
+          <Empty description="Select a Session to show frames for each phase" />
         ) : (
           <Row gutter={16}>
             {(detail.phases.length > 0 ? detail.phases.map((p) => p.type) : (['bias', 'dark', 'flat', 'light'] as PhaseType[])).map((t) => {
@@ -499,24 +499,24 @@ export default function ProcessingPage() {
                   <Card
                     size="small"
                     type="inner"
-                    title={`${PHASE_LABELS[t]}（${frames.length}）`}
+                    title={`${PHASE_LABELS[t]} (${frames.length})`}
                     extra={
                       <Checkbox
                         checked={excludedCount === 0}
                         onChange={(e) => togglePhaseAll(t, e.target.checked)}
                       >
-                        全选
+                        Select All
                       </Checkbox>
                     }
                   >
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      计划 {detail.phases.find((p) => p.type === t)?.count ?? 0} 张 · 未勾选（将排除）{excludedCount}
+                      Planned {detail.phases.find((p) => p.type === t)?.count ?? 0} frames · Unchecked (will be excluded) {excludedCount}
                     </Typography.Text>
                     <List
                       size="small"
                       style={{ maxHeight: 320, overflow: 'auto' }}
                       dataSource={frames}
-                      locale={{ emptyText: '暂无帧' }}
+                      locale={{ emptyText: 'No frames' }}
                       renderItem={(f: FrameInfo) => (
                         <List.Item
                           key={f.file}
@@ -526,7 +526,7 @@ export default function ProcessingPage() {
                               checked={!excluded.has(frameKey(t, f.file))}
                               onChange={(e) => toggleInclude(t, f.file, e.target.checked)}
                             >
-                              纳入
+                              Include
                             </Checkbox>,
                           ]}
                         >
@@ -549,14 +549,14 @@ export default function ProcessingPage() {
         )}
       </Card>
 
-      <Card size="small" title="处理管线（Calibrate → Stack → Rescale）">
+      <Card size="small" title="Processing Pipeline (Calibrate → Stack → Rescale)">
         <Steps
           size="small"
           current={stepCurrent}
           items={[
-            { title: 'Step 1 · Construct Bias/Dark/Flat Master & Calibrate', description: '合成 Master 并逐帧标定' },
-            { title: 'Step 2 · Stacking Light Field', description: '叠加 + 可选配准' },
-            { title: 'Step 3 · Rescale & Preview', description: '重标定并刷新预览' },
+            { title: 'Step 1 · Construct Bias/Dark/Flat Master & Calibrate', description: 'Build masters and calibrate each frame' },
+            { title: 'Step 2 · Stacking Light Field', description: 'Stack + optional registration' },
+            { title: 'Step 3 · Rescale & Preview', description: 'Rescale and refresh the preview' },
           ]}
           style={{ marginBottom: 16 }}
         />
@@ -586,10 +586,10 @@ export default function ProcessingPage() {
                   disabled={!selectedId || calibrateActive}
                   onClick={() => void runCalibrate()}
                 >
-                  运行 Calibrate（排除未勾选帧）
+                  Run Calibrate (Exclude Unchecked Frames)
                 </Button>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  纳入：{inclusionSummary}（共 {includedCountTotal} 帧）
+                  Included: {inclusionSummary} ({includedCountTotal} frames total)
                 </Typography.Text>
               </Space>
             </Card>
@@ -614,7 +614,7 @@ export default function ProcessingPage() {
                   </Form.Item>
                 </Form>
                 <Checkbox checked={registration} onChange={(e) => setRegistration(e.target.checked)}>
-                  配准（registration，FFT 相位相关平移对齐）
+                  Registration (FFT phase-correlation translation alignment)
                 </Checkbox>
                 <Button
                   type="primary"
@@ -622,13 +622,13 @@ export default function ProcessingPage() {
                   disabled={!selectedId || !calibrateDone || stackActive}
                   onClick={() => void runStack()}
                 >
-                  运行 Stack（排除未勾选帧）
+                  Run Stack (Exclude Unchecked Frames)
                 </Button>
                 <Typography.Text type={calibrateDone ? 'secondary' : 'warning'} style={{ fontSize: 12 }}>
                   {stackHint}
                 </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  纳入：{inclusionSummary}（共 {includedCountTotal} 帧）
+                  Included: {inclusionSummary} ({includedCountTotal} frames total)
                 </Typography.Text>
               </Space>
             </Card>
@@ -637,14 +637,14 @@ export default function ProcessingPage() {
             <Card size="small" type="inner" title="Step 3 · Rescale & Preview">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Select
-                  placeholder="选择结果文件"
+                  placeholder="Select result file"
                   style={{ width: '100%' }}
                   value={selectedResult}
                   onChange={setSelectedResult}
                   options={(detail?.results ?? []).map((r) => ({ value: r.file, label: r.file }))}
                 />
                 <Space wrap>
-                  <span>Rescale：</span>
+                  <span>Rescale: </span>
                   <Radio.Group
                     value={stretchMethod}
                     onChange={(e) => setStretchMethod(e.target.value as StretchMethod)}
@@ -657,9 +657,9 @@ export default function ProcessingPage() {
                   />
                 </Space>
                 <div>
-                  <Typography.Text>black：{black}</Typography.Text>
+                  <Typography.Text>black: {black}</Typography.Text>
                   <Slider min={0} max={4095} step={1} value={black} onChange={setBlack} />
-                  <Typography.Text>white：{white}</Typography.Text>
+                  <Typography.Text>white: {white}</Typography.Text>
                   <Slider min={0} max={4095} step={1} value={white} onChange={setWhite} />
                 </div>
                 <Button
@@ -668,13 +668,13 @@ export default function ProcessingPage() {
                   disabled={!selectedResult || !stackDone || stretchActive}
                   onClick={() => void runStretch()}
                 >
-                  应用重标定并刷新预览
+                  Apply Rescale & Refresh Preview
                 </Button>
                 <Typography.Text type={stackDone ? 'secondary' : 'warning'} style={{ fontSize: 12 }}>
                   {stretchHint}
                 </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  对叠加结果重新标定显示亮度范围，生成可查看的预览图（8-bit PNG）。
+                  Rescales the stacked result to a displayable brightness range and produces a viewable preview image (8-bit PNG).
                 </Typography.Text>
               </Space>
             </Card>
@@ -682,7 +682,7 @@ export default function ProcessingPage() {
         </Row>
       </Card>
 
-      <Card size="small" title="任务进度（WS /ws/events + 1s 轮询 GET /api/process/jobs/{id}）">
+      <Card size="small" title="Job Progress (WS /ws/events + 1s polling GET /api/process/jobs/{id})">
         {captureState && captureState.status !== 'idle' && (
           <div style={{ marginBottom: 12 }}>
             <Tag color="geekblue">capture</Tag>
@@ -690,11 +690,11 @@ export default function ProcessingPage() {
               <Typography.Text>{captureState.session_name ?? ''}</Typography.Text>
               <Tag color="processing">{captureState.status}</Tag>
               <Typography.Text>
-                帧 {captureState.frames_done}/{captureState.total_frames}
+                Frame {captureState.frames_done}/{captureState.total_frames}
               </Typography.Text>
               {captureState.current_phase && (
                 <Typography.Text>
-                  {PHASE_LABELS[captureState.current_phase.type]}（{captureState.current_phase.index + 1}/{captureState.current_phase.total}）
+                  {PHASE_LABELS[captureState.current_phase.type]} ({captureState.current_phase.index + 1}/{captureState.current_phase.total})
                 </Typography.Text>
               )}
             </Space>
@@ -706,7 +706,7 @@ export default function ProcessingPage() {
           </div>
         )}
         {Object.keys(jobs).length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务进度" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No job progress yet" />
         ) : (
           <Table<JobEventData>
             rowKey="id"
@@ -715,14 +715,14 @@ export default function ProcessingPage() {
             dataSource={Object.values(jobs)}
             columns={[
               { title: 'Job ID', dataIndex: 'id' },
-              { title: '类型', dataIndex: 'type', render: (t: JobEventData['type']) => JOB_TYPE_LABELS[t] },
+              { title: 'Type', dataIndex: 'type', render: (t: JobEventData['type']) => JOB_TYPE_LABELS[t] },
               {
-                title: '状态',
+                title: 'Status',
                 dataIndex: 'status',
                 render: (s: JobEventData['status']) => <Badge color={JOB_STATUS_META[s].color} text={JOB_STATUS_META[s].text} />,
               },
               {
-                title: '进度',
+                title: 'Progress',
                 render: (_, job) => (
                   <Progress
                     percent={job.status === 'done' ? 100 : job.progress ?? 0}
@@ -732,15 +732,15 @@ export default function ProcessingPage() {
                   />
                 ),
               },
-              { title: '消息', dataIndex: 'message' },
+              { title: 'Message', dataIndex: 'message' },
             ]}
           />
         )}
       </Card>
 
-      <Card size="small" title="结果文件（results/）与预览">
+      <Card size="small" title="Result Files (results/) & Preview">
         {!detail || detail.results.length === 0 ? (
-          <Empty description="暂无结果文件（运行 Calibrate → Stack 后出现）" />
+          <Empty description="No result files yet (run Calibrate → Stack to produce them)" />
         ) : (
           <>
             <Table<{ file: string; url: string; preview: string }>
@@ -750,27 +750,27 @@ export default function ProcessingPage() {
               dataSource={detail.results}
               columns={[
                 {
-                  title: '文件',
+                  title: 'File',
                   dataIndex: 'file',
                   render: (file: string, record) => (
                     <Space direction="vertical" size={0}>
                       <Typography.Text strong>{file}</Typography.Text>
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        FITS：{record.url} · 预览：{record.preview}
+                        FITS: {record.url} · Preview: {record.preview}
                       </Typography.Text>
                     </Space>
                   ),
                 },
                 {
-                  title: '操作',
+                  title: 'Actions',
                   width: 260,
                   render: (_, record) => (
                     <Space>
                       <Button size="small" href={resolveUrl(record.url)} target="_blank" icon={<DownloadOutlined />}>
-                        下载 FITS
+                        Download FITS
                       </Button>
                       <Button size="small" href={resolveUrl(record.preview)} target="_blank">
-                        打开预览 PNG
+                        Open Preview PNG
                       </Button>
                     </Space>
                   ),
@@ -781,17 +781,17 @@ export default function ProcessingPage() {
               <div style={{ marginTop: 12, textAlign: 'center' }}>
                 <Space wrap>
                   <Typography.Text type="secondary">
-                    当前预览（{selectedResult}，Rescale 提交 / 完成后自动刷新）
+                    Current Preview ({selectedResult}, auto-refreshes on Rescale submit / completion)
                   </Typography.Text>
                   <Button size="small" icon={<ReloadOutlined />} onClick={refreshPreview}>
-                    刷新预览
+                    Refresh Preview
                   </Button>
                 </Space>
                 <div style={{ background: '#000', padding: 8 }}>
                   <img
                     key={previewUrl}
                     src={previewUrl}
-                    alt="重标定预览"
+                    alt="Rescaled preview"
                     style={{ maxWidth: '100%', maxHeight: 560 }}
                     onLoad={(e) => {
                       // 修复预览可见性：成功后复位 onError 设置过的 display:none
@@ -809,7 +809,7 @@ export default function ProcessingPage() {
       </Card>
 
       {detail?.qc && (
-        <Card size="small" title="QC 报告">
+        <Card size="small" title="QC Report">
           <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{JSON.stringify(detail.qc, null, 2)}</pre>
         </Card>
       )}

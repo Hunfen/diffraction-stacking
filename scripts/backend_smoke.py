@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""端到端自测（Mock 相机路径）。
+"""End-to-end self test (Mock camera path).
 
-用法：cd backend && .venv/bin/python ../scripts/backend_smoke.py
-退出码：0 = 全部通过；1 = 有失败项。
+Usage: cd backend && .venv/bin/python ../scripts/backend_smoke.py
+Exit code: 0 = all passed; 1 = some checks failed.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ PROC = None
 RESULTS = []
 SESSION_ID = None
 EFFECTIVE_SESSION_NAME = None
-# 与 step_capture 中用户原始输入对应的 v1.2 清洗结果后缀
+# Sanitized suffix matching the raw user input used in step_capture (v1.2).
 SANITIZED_SESSION_SUFFIX = "SMOKE_LEED_001_a_b_x"
 
 
@@ -70,7 +70,7 @@ def http_req(method, path, body=None, expect=None, timeout=30):
                 payload = raw
             if expect is not None:
                 check(status == expect,
-                      f"{method} {path} -> HTTP {status}（期望 {expect}）")
+                      f"{method} {path} -> HTTP {status} (expected {expect})")
             return status, payload
     except urllib.error.HTTPError as e:
         raw = e.read()
@@ -80,7 +80,7 @@ def http_req(method, path, body=None, expect=None, timeout=30):
             payload = raw
         if expect is not None:
             check(e.code == expect,
-                  f"{method} {path} -> HTTP {e.code}（期望 {expect}）")
+                  f"{method} {path} -> HTTP {e.code} (expected {expect})")
         return e.code, payload
 
 
@@ -116,9 +116,9 @@ def wait_server(timeout=40):
             last = exc
         if PROC is not None and PROC.poll() is not None:
             out = PROC.stdout.read().decode("utf-8", "replace") if PROC.stdout else ""
-            raise RuntimeError(f"uvicorn 提前退出（code={PROC.returncode}）：\n{out}")
+            raise RuntimeError(f"uvicorn exited early (code={PROC.returncode}):\n{out}")
         time.sleep(0.3)
-    raise RuntimeError(f"服务未在 {timeout}s 内就绪：{last}")
+    raise RuntimeError(f"Server not ready within {timeout}s: {last}")
 
 
 def poll_state(cond, timeout=60, interval=0.1):
@@ -155,83 +155,83 @@ async def recv_live_pair(fps=10, scale=0.5, quality=70, timeout=15):
 
 def step_health_devices():
     status, h = http_req("GET", "/api/health")
-    check(status == 200 and h.get("ok"), "GET /api/health 返回 ok 包裹")
+    check(status == 200 and h.get("ok"), "GET /api/health returns ok envelope")
     d = h.get("data") or {}
     check(d.get("status") == "ok", "health.status == ok")
-    check(d.get("camera_driver") == "mock", "health.camera_driver == mock（macOS）")
+    check(d.get("camera_driver") == "mock", "health.camera_driver == mock (macOS)")
 
     status, payload = http_req("GET", "/api/devices")
     devs = payload.get("data") if payload.get("ok") else []
-    check(status == 200 and isinstance(devs, list), "GET /api/devices data 为数组")
+    check(status == 200 and isinstance(devs, list), "GET /api/devices data is an array")
     mock = [x for x in devs if x.get("id") == "mock-1"]
-    check(bool(mock) and mock[0]["kind"] == "mock", "设备列表包含 mock-1")
+    check(bool(mock) and mock[0]["kind"] == "mock", "device list contains mock-1")
 
     status, payload = http_req("POST", "/api/device/open", {"id": "no-such-device"},
                                expect=404)
     check(not payload.get("ok") and isinstance(payload.get("error"), str),
-          "错误统一包裹（ok=false + error 字符串 + 404）")
+          "error envelope (ok=false + error string + 404)")
 
     status, root_payload = http_req("GET", "/")
     root_ok = status == 200 and (
         (isinstance(root_payload, dict) and root_payload.get("ok")
          and root_payload["data"].get("frontend_built") is False)
         or isinstance(root_payload, (bytes, bytearray)))
-    check(root_ok, "GET / 返回前端未构建提示（或已构建时的首页）")
+    check(root_ok, "GET / returns frontend-not-built message (or index when built)")
 
 
 def step_open_properties():
     status, payload = http_req("POST", "/api/device/open", {"id": "mock-1"})
     check(status == 200 and payload.get("ok") and payload["data"]["connected"] is True,
-          "打开 mock-1")
+          "open mock-1")
 
     _, info = http_req("GET", "/api/device/info")
     check(info.get("ok") and info["data"]["connected"] is True
-          and len(info["data"]["properties"]) > 0, "device/info 含属性列表")
+          and len(info["data"]["properties"]) > 0, "device/info includes property list")
 
     _, props_payload = http_req("GET", "/api/properties")
     props = {p["name"]: p for p in props_payload["data"]["properties"]}
     check("exposure" in props and props["exposure"]["min"] == 30
-          and props["exposure"]["max"] == 30000000, "exposure 范围 30–30000000 us")
+          and props["exposure"]["max"] == 30000000, "exposure range 30-30000000 us")
     check(props["width"]["value"] == 1024 and props["height"]["value"] == 768,
-          "默认 ROI 1024×768")
+          "default ROI 1024x768")
     check("mock_pattern" in props and "leed" in props["mock_pattern"].get("options", []),
-          "mock_pattern 枚举（leed/rheed）")
+          "mock_pattern enum (leed/rheed)")
 
     _, r = http_req("PUT", "/api/properties/exposure", {"value": 3000})
-    check(r.get("ok") and r["data"]["actual"] == 3000, "设置 exposure=3000 生效")
+    check(r.get("ok") and r["data"]["actual"] == 3000, "setting exposure=3000 applied")
     _, r = http_req("PUT", "/api/properties/gain", {"value": 1.5})
-    check(r.get("ok") and abs(r["data"]["actual"] - 1.5) < 1e-6, "设置 gain=1.5")
+    check(r.get("ok") and abs(r["data"]["actual"] - 1.5) < 1e-6, "setting gain=1.5")
     _, r = http_req("PUT", "/api/properties/black_level", {"value": 5})
-    check(r.get("ok") and r["data"]["actual"] == 5, "设置 black_level=5")
+    check(r.get("ok") and r["data"]["actual"] == 5, "setting black_level=5")
     _, r = http_req("PUT", "/api/properties/exposure", {"value": 999999999})
-    check(r.get("ok") and r["data"]["actual"] == 30000000, "越界值自动钳制到 max")
+    check(r.get("ok") and r["data"]["actual"] == 30000000, "out-of-range value clamped to max")
     http_req("PUT", "/api/properties/exposure", {"value": 3000})
-    # 触发未分类相机错误（NaN → round/int 内部 ValueError）：
-    # 500 必须统一“服务器内部错误”，不得带异常文本
+    # Trigger an unclassified camera error (NaN -> round/int internal ValueError):
+    # 500 must be the generic "Internal server error" without exception details.
     _, r500 = http_req("PUT", "/api/properties/exposure", {"value": "nan"},
                        expect=500)
     err = (r500 or {}).get("error", "")
-    check(not r500.get("ok") and err == "服务器内部错误"
+    check(not r500.get("ok") and err == "Internal server error"
           and "nan" not in err.lower() and "ValueError" not in err
           and "Traceback" not in err,
-          "未分类相机错误 500 不泄漏异常细节")
+          "unclassified camera error 500 does not leak exception details")
     _, r = http_req("PUT", "/api/properties/mock_drift", {"value": True})
-    check(r.get("ok") and r["data"]["actual"] is True, "开启 mock 慢漂移")
+    check(r.get("ok") and r["data"]["actual"] is True, "enable mock slow drift")
 
 
 def step_settings():
     default_root = (REPO / "data").resolve()
     status, s = http_req("GET", "/api/settings")
     check(status == 200 and s.get("ok") and s["data"]["data_root"] == str(default_root),
-          "GET /api/settings 返回默认数据目录（绝对路径）")
+          "GET /api/settings returns default data dir (absolute path)")
     check(isinstance(s["data"].get("writable"), bool)
           and s["data"]["writable"] is True,
-          "settings.writable 为布尔值且默认目录可写")
+          "settings.writable is boolean and default dir is writable")
 
     _, bad = http_req("PUT", "/api/settings", {"data_root": "relative/path"},
                       expect=400)
-    check(not bad.get("ok") and "绝对路径" in bad.get("error", ""),
-          "相对路径 data_root 返回 400（中文错误）")
+    check(not bad.get("ok") and "absolute path" in bad.get("error", ""),
+          "relative data_root returns 400 (English error)")
 
     tmp_base = Path(tempfile.mkdtemp(prefix="ds-stack-smoke-"))
     tmp_root = (tmp_base / "backend-data").resolve()
@@ -239,72 +239,72 @@ def step_settings():
     check(status == 200 and r.get("ok")
           and r["data"]["data_root"] == str(tmp_root)
           and r["data"].get("writable") is True,
-          "PUT /api/settings 自动创建并切换数据目录")
+          "PUT /api/settings creates and switches data dir")
     check((tmp_root / "snapshots").is_dir()
           and (tmp_root / "captures").is_dir(),
-          "新数据目录下自动创建 snapshots/ 与 captures/")
+          "new data dir has snapshots/ and captures/ created automatically")
     _, r2 = http_req("GET", "/api/settings")
     check(r2.get("ok") and r2["data"]["data_root"] == str(tmp_root),
-          "GET /api/settings 立即反映运行中修改")
+          "GET /api/settings reflects runtime change immediately")
 
     _, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
     check(snap.get("ok") and snap["data"]["url"].startswith("/api/files/snapshots/"),
-          "切换数据目录后 snapshot 成功")
+          "snapshot succeeds after switching data dir")
     if snap.get("ok"):
         new_file = tmp_root / "snapshots" / snap["data"]["file"]
-        check(new_file.is_file(), "snapshot 落在新数据目录 snapshots/")
+        check(new_file.is_file(), "snapshot lands in new data dir snapshots/")
         check(not (default_root / "snapshots" / snap["data"]["file"]).exists(),
-              "默认数据目录不产生该快照")
+              "default data dir does not get this snapshot")
         status, body, headers = raw_response(snap["data"]["url"])
         check(status == 200 and headers.get("cache-control") == "no-store",
-              "snapshot 文件响应含 Cache-Control: no-store")
+              "snapshot file response has Cache-Control: no-store")
 
     status, r3 = http_req("PUT", "/api/settings", {"data_root": str(default_root)})
     check(status == 200 and r3.get("ok")
           and r3["data"]["data_root"] == str(default_root),
-          "PUT /api/settings 恢复默认数据目录")
+          "PUT /api/settings restores default data dir")
     shutil.rmtree(tmp_base, ignore_errors=True)
 
 
 def step_chinese_session():
-    """v1.2 FIX：中文 session 真实拍摄，FITS SESSION 头必须 ASCII 安全。"""
+    """v1.2 FIX: real capture with a Chinese session; FITS SESSION header must stay ASCII-safe."""
     raw_name = "中文_LEED测试"
     phases = [{"type": "bias", "count": 2, "exposure_us": 3000,
-               "note": "中文会话 smoke"}]
+               "note": "chinese session smoke"}]
     status, plan = http_req("POST", "/api/capture/plan",
                             {"session_name": raw_name, "phases": phases})
-    check(status == 200 and plan.get("ok"), "中文 session_name 的 capture/plan 成功")
+    check(status == 200 and plan.get("ok"), "capture/plan succeeds with Chinese session_name")
     effective = (plan.get("data") or {}).get("session_name")
     check(bool(effective) and "中文" in effective and "LEED" in effective,
-          f"effective session_name 保留中文：{effective}")
+          f"effective session_name keeps Chinese: {effective}")
     check(re.fullmatch(r"^\d{8}T\d{2}-\d{2}-\d{2}_中文_LEED测试$",
                        effective or "") is not None,
-          "中文 effective 格式为 时间戳_中文原始名")
+          "Chinese effective format is timestamp_Chinese-raw-name")
 
     status, r = http_req("POST", "/api/capture/start")
     check(status == 200 and r.get("ok") and r["data"]["status"] == "running",
-          "中文会话 capture/start 成功")
+          "Chinese session capture/start succeeds")
     state = poll_state(lambda s: s.get("status") == "finished", timeout=60)
-    check(state.get("status") == "finished", "中文会话拍摄完成（finished）")
-    check(state.get("frames_done") == 2, "中文会话 frames_done == 2")
+    check(state.get("status") == "finished", "Chinese session capture finished")
+    check(state.get("frames_done") == 2, "Chinese session frames_done == 2")
 
     _, sess = http_req("GET", "/api/sessions")
     target = next((s for s in sess.get("data", []) if s.get("id") == effective),
                   None)
     check(target is not None and target.get("name") == effective,
-          "sessions 列表保留中文 effective id/name")
+          "sessions list keeps Chinese effective id/name")
     if target:
         check(target.get("frame_counts", {}).get("bias") == 2,
-              "中文会话 frame_counts.bias == 2")
+              "Chinese session frame_counts.bias == 2")
 
     _, detail = http_req("GET", f"/api/sessions/{quote(effective, safe='')}")
     check(detail.get("ok") and detail["data"].get("name") == effective,
-          "session 详情 name 保留中文 effective")
+          "session detail name keeps Chinese effective")
     frames = (detail.get("data") or {}).get("frames", {}).get("bias", [])
-    check(len(frames) == 2, "中文会话详情 frames.bias == 2")
+    check(len(frames) == 2, "Chinese session detail frames.bias == 2")
     if frames:
         check(effective in frames[0].get("url", ""),
-              "帧 URL 保留中文 effective")
+              "frame URL keeps Chinese effective")
 
     try:
         from astropy.io import fits
@@ -313,64 +313,65 @@ def step_chinese_session():
             session_hdr = hdul[0].header.get("SESSION")
         check(isinstance(session_hdr, str) and session_hdr.isascii()
               and session_hdr.isprintable() and bool(session_hdr.strip()),
-              f"FITS SESSION 头为 printable ASCII：{session_hdr!r}")
-        check("中文" not in session_hdr, "FITS SESSION 头不含中文")
+              f"FITS SESSION header is printable ASCII: {session_hdr!r}")
+        check("中文" not in session_hdr, "FITS SESSION header contains no Chinese")
     except Exception as exc:  # noqa: BLE001
-        check(False, f"中文会话 FITS 读取异常：{exc}")
+        check(False, f"failed to read Chinese session FITS: {exc}")
 
 
 def step_live_snapshot():
     status, r = http_req("POST", "/api/live/start",
                          {"fps": 10, "scale": 0.5, "quality": 70})
     check(status == 200 and r.get("ok") and r["data"]["streaming"] is True,
-          "live/start 成功")
+          "live/start succeeds")
 
     try:
         stats_text, jpeg = asyncio.run(recv_live_pair())
     except Exception as exc:  # noqa: BLE001
-        check(False, f"/ws/live 收帧失败：{exc}")
+        check(False, f"/ws/live frame receive failed: {exc}")
         stats_text, jpeg = None, None
     if stats_text is not None:
         stats = json.loads(stats_text)
         keys_ok = all(k in stats for k in
                       ("min", "max", "mean", "std", "saturated_pct", "fps",
                        "histogram"))
-        check(keys_ok, "live 统计字段齐全（min/max/mean/std/sat/fps/histogram）")
+        check(keys_ok, "live stats include min/max/mean/std/sat/fps/histogram")
         check(isinstance(stats.get("histogram"), list)
               and len(stats["histogram"]) == 256
               and all(isinstance(v, int) for v in stats["histogram"]),
-              "histogram 为 256 个 int")
+              "histogram has 256 ints")
         check(isinstance(jpeg, (bytes, bytearray)) and jpeg[:2] == b"\xff\xd8",
-              "紧随统计的二进制消息为 JPEG（0xFFD8）")
+              "binary message right after stats is JPEG (0xFFD8)")
 
     _, r = http_req("POST", "/api/live/stop")
-    check(r.get("ok") and r["data"]["streaming"] is False, "live/stop 成功")
+    check(r.get("ok") and r["data"]["streaming"] is False, "live/stop succeeds")
 
     _, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
     check(snap.get("ok") and snap["data"]["url"].startswith("/api/files/snapshots/"),
-          "snapshot fits 返回 file/url")
+          "snapshot fits returns file/url")
     if snap.get("ok"):
         status, body = raw_request(snap["data"]["url"])
-        check(status == 200 and body[:6] == b"SIMPLE", "快照 FITS 可下载")
+        check(status == 200 and body[:6] == b"SIMPLE", "snapshot FITS is downloadable")
         try:
             from astropy.io import fits
             with fits.open(REPO / "data" / "snapshots" / snap["data"]["file"]) as hdul:
                 snap_hdr = hdul[0].header
             for key in ("EXPOSURE", "GAIN", "BLACKLEV", "TEMP",
                         "FRAMETYP", "CAMERA", "SERIAL", "SESSION", "NFRAME"):
-                check(key in snap_hdr, f"快照 FITS 头含 {key}")
+                check(key in snap_hdr, f"snapshot FITS header contains {key}")
             check(snap_hdr.get("FRAMETYP") == "SNAPSHOT",
-                  "快照 FRAMETYP == SNAPSHOT")
+                  "snapshot FRAMETYP == SNAPSHOT")
             check(snap_hdr.get("SESSION") == "SNAPSHOT" and snap_hdr.get("NFRAME") == 1,
-                  "快照 SESSION=SNAPSHOT、NFRAME=1")
+                  "snapshot SESSION=SNAPSHOT, NFRAME=1")
         except Exception as exc:  # noqa: BLE001
-            check(False, f"快照 FITS 头校验异常：{exc}")
+            check(False, f"snapshot FITS header validation failed: {exc}")
     _, snap_png = http_req("POST", "/api/snapshot", {"format": "png"})
     if snap_png.get("ok"):
         status, body = raw_request(snap_png["data"]["url"])
-        check(status == 200 and body[:4] == b"\x89PNG", "快照 PNG 可下载")
+        check(status == 200 and body[:4] == b"\x89PNG", "snapshot PNG is downloadable")
 
-    # 快照保存失败路径：500 统一“服务器内部错误”，不泄漏 PermissionError 等细节
+    # Snapshot save failure path: 500 is the generic "Internal server error"
+    # without leaking PermissionError details.
     snap_dir = REPO / "data" / "snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
     orig_mode = stat.S_IMODE(snap_dir.stat().st_mode)
@@ -379,77 +380,76 @@ def step_live_snapshot():
         _, r500 = http_req("POST", "/api/snapshot", {"format": "fits"},
                            expect=500)
         err = (r500 or {}).get("error", "")
-        check(not r500.get("ok") and err == "服务器内部错误"
+        check(not r500.get("ok") and err == "Internal server error"
               and "PermissionError" not in err and "Traceback" not in err
               and "Permission" not in err,
-              "快照保存失败 500 不泄漏异常细节")
+              "snapshot save failure 500 does not leak exception details")
     finally:
         os.chmod(snap_dir, orig_mode)
 
 
 def step_snapshot_folders():
-    """v1.3：快照子文件夹（folder 校验、目录创建、folders 列表、下载）。"""
+    """v1.3: snapshot subfolders (folder validation, creation, folders list, download)."""
     snap_root = REPO / "data" / "snapshots"
 
     status, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
     data = snap.get("data") if snap.get("ok") else {}
-    check(status == 200 and snap.get("ok"), "folder 缺省：POST /api/snapshot 成功")
+    check(status == 200 and snap.get("ok"), "default folder: POST /api/snapshot succeeds")
     check(data.get("folder") == ""
           and data.get("url") == f"/api/files/snapshots/{data.get('file')}",
-          "folder 缺省 → 存根目录（folder=''，url 不含子目录段）")
+          "default folder -> root dir (folder='', url has no subfolder segment)")
     if data.get("file"):
         check((snap_root / data["file"]).is_file(),
-              "folder 缺省快照落在 data/snapshots/ 根目录")
+              "default-folder snapshot lands in data/snapshots/ root")
 
     status, snap_blank = http_req("POST", "/api/snapshot",
                                   {"format": "png", "folder": "   "})
     blank = snap_blank.get("data") if snap_blank.get("ok") else {}
     check(status == 200 and snap_blank.get("ok") and blank.get("folder") == "",
-          "folder 为空白 → 存根目录")
+          "blank folder -> root dir")
 
     folder_name = "测试文件夹"
     status, snap_sub = http_req("POST", "/api/snapshot",
                                 {"format": "fits", "folder": folder_name})
     sub = snap_sub.get("data") if snap_sub.get("ok") else {}
-    check(status == 200 and snap_sub.get("ok"), "folder='测试文件夹'：POST /api/snapshot 成功")
-    check(sub.get("folder") == folder_name, "返回 folder 字段回显子目录名")
+    check(status == 200 and snap_sub.get("ok"), f"folder='{folder_name}': POST /api/snapshot succeeds")
+    check(sub.get("folder") == folder_name, "response echoes folder field")
     check(sub.get("url") == f"/api/files/snapshots/{folder_name}/{sub.get('file')}",
-          "url 形如 /api/files/snapshots/<folder>/<file>")
+          "url is /api/files/snapshots/<folder>/<file>")
     check(bool(sub.get("file"))
           and (snap_root / folder_name / sub["file"]).is_file(),
-          "快照文件自动创建并落入子目录")
+          "snapshot file is created inside the subfolder")
 
     if sub.get("url"):
         status, body, headers = raw_response(quote(sub["url"], safe="/"))
-        check(status == 200 and body[:6] == b"SIMPLE", "子目录快照 url 可下载（FITS）")
+        check(status == 200 and body[:6] == b"SIMPLE", "subfolder snapshot url downloads (FITS)")
         check(headers.get("cache-control") == "no-store",
-              "子目录快照下载保持 Cache-Control: no-store")
+              "subfolder snapshot download keeps Cache-Control: no-store")
 
     _, fp = http_req("GET", "/api/snapshot/folders")
     folders = ((fp.get("data") or {}).get("folders") or []) if fp.get("ok") else []
     check(fp.get("ok") and isinstance((fp.get("data") or {}).get("folders"), list),
-          "GET /api/snapshot/folders 返回 ok + folders 数组")
+          "GET /api/snapshot/folders returns ok + folders array")
     root_entry = next((f for f in folders if f.get("name") == ""), None)
     check(root_entry is not None and root_entry.get("files", 0) >= 1,
-          "folders 含根目录条目 name='' 且 files≥1")
+          "folders include root entry name='' with files>=1")
     names = [f.get("name") for f in folders if f.get("name") != ""]
-    check(names == sorted(names), "子目录按名称排序")
+    check(names == sorted(names), "subfolders are sorted by name")
     target = next((f for f in folders if f.get("name") == folder_name), None)
     check(target is not None and target.get("files", 0) >= 1,
-          "测试文件夹出现在 folders 且 files≥1")
+          f"folder '{folder_name}' appears in folders with files>=1")
 
     for bad in ("../evil", "/abs", "a/b", "a\\b", 'bad:name'):
         status, r = http_req("POST", "/api/snapshot",
                              {"format": "fits", "folder": bad}, expect=400)
         err = (r or {}).get("error", "")
-        check(status == 400 and not r.get("ok")
-              and bool(re.search(r"[\u4e00-\u9fff]", err)),
-              f"非法 folder {bad!r} → 400 中文错误")
+        check(status == 400 and not r.get("ok") and "folder" in err.lower(),
+              f"invalid folder {bad!r} -> 400 English error")
 
     if sub.get("file"):
         status, _ = raw_request(quote(
             f"/api/files/snapshots/{folder_name}/../{sub['file']}", safe="/"))
-        check(status == 400, "snapshots 子目录路径穿越（<folder>/../<file>）→ 400")
+        check(status == 400, "snapshot subfolder traversal (<folder>/../<file>) -> 400")
 
 
 def step_capture():
@@ -463,91 +463,91 @@ def step_capture():
     status, bad_plan = http_req("POST", "/api/capture/plan",
                                 {"session_name": "EMPTY", "phases": []},
                                 expect=400)
-    check(status == 400 and not bad_plan.get("ok"), "空 phases 的 plan 返回 400")
+    check(status == 400 and not bad_plan.get("ok"), "empty-phases plan returns 400")
 
     raw_session_name = "SMOKE LEED/001:a*b?x"
     status, plan = http_req("POST", "/api/capture/plan",
                             {"session_name": raw_session_name, "phases": phases})
     check(status == 200 and plan.get("ok") and plan["data"].get("plan_id"),
-          "capture/plan 返回 plan_id")
+          "capture/plan returns plan_id")
     echoed = plan["data"]["phases"]
     check(len(echoed) == 4 and echoed[0]["type"] == "bias"
-          and echoed[1]["exposure_us"] == 3000, "plan 回显并解析 null 曝光为当前值")
+          and echoed[1]["exposure_us"] == 3000, "plan echoes and resolves null exposure to current value")
 
     effective = plan["data"].get("session_name")
     EFFECTIVE_SESSION_NAME = effective
     expected_re = r"^\d{8}T\d{2}-\d{2}-\d{2}_" + SANITIZED_SESSION_SUFFIX + r"$"
     check(bool(effective) and re.fullmatch(expected_re, effective) is not None,
-          f"plan 返回 effective session_name（时间戳前缀_清洗名）：{effective}")
+          f"plan returns effective session_name (timestamp_sanitized): {effective}")
     check(not re.search(r'[<>:"/\\|?*\s]', effective or ""),
-          "effective session_name 不含路径分隔符/Windows 非法字符/空白")
+          "effective session_name has no separators/Windows-illegal chars/spaces")
 
     status, r = http_req("POST", "/api/capture/start")
     check(status == 200 and r.get("ok") and r["data"]["status"] == "running",
-          "capture/start 成功")
+          "capture/start succeeds")
     _, state0 = http_req("GET", "/api/capture/state")
     check(state0.get("ok") and state0["data"].get("session_name") == effective,
-          "capture state 的 session_name 使用 effective")
+          "capture state session_name uses effective name")
 
-    # v1.1 状态机：非 LIGHT 相位 waiting_user(needs_user=false) → 自动 capturing
+    # v1.1 state machine: non-LIGHT phases waiting_user(needs_user=false) -> auto capturing
     bias_wait = poll_state(
         lambda s: s.get("status") == "waiting_user"
         and (s.get("current_phase") or {}).get("type") == "bias",
         timeout=10, interval=0.01)
     check(bias_wait.get("status") == "waiting_user"
           and bias_wait.get("needs_user") is False,
-          "bias 相位进入 waiting_user 且 needs_user=false")
+          "bias phase enters waiting_user with needs_user=false")
     _, rr = http_req("POST", "/api/capture/resume", expect=409)
-    check(not rr.get("ok"), "非 LIGHT 的 waiting_user 中 resume 返回 409")
+    check(not rr.get("ok"), "resume during non-LIGHT waiting_user returns 409")
     bias_cap = poll_state(
         lambda s: s.get("status") == "capturing"
         and (s.get("current_phase") or {}).get("type") == "bias",
         timeout=10, interval=0.01)
     check(bias_cap.get("status") == "capturing" and bias_cap.get("needs_user") is False,
-          "bias 自动进入 capturing（needs_user=false）")
+          "bias automatically enters capturing (needs_user=false)")
 
     state = poll_state(
         lambda s: s.get("status") == "waiting_user"
         and (s.get("current_phase") or {}).get("type") == "light", timeout=60)
     check(state.get("status") == "waiting_user"
           and state["current_phase"]["type"] == "light",
-          "LIGHT 前进入 waiting_user（强制人工确认点）")
-    check(state.get("needs_user") is True, "LIGHT 的 waiting_user needs_user=true")
-    check("直方图" in (state.get("prompt") or ""), "LIGHT prompt 含直方图确认文案")
+          "waiting_user before LIGHT (mandatory manual confirmation)")
+    check(state.get("needs_user") is True, "LIGHT waiting_user needs_user=true")
+    check("histogram" in (state.get("prompt") or ""), "LIGHT prompt contains histogram confirmation text")
     check(state["current_phase"]["index"] == 4 and state["total_frames"] == 12,
-          "状态：第 4/4 相位，共 12 帧")
-    check(any("BIAS" in e["msg"] for e in state.get("log", [])), "日志含 BIAS 完成记录")
+          "state: phase 4/4, 12 frames total")
+    check(any("BIAS" in e["msg"] for e in state.get("log", [])), "log contains BIAS done entry")
 
-    # 拍摄进行中提交处理任务应 409（会话目录此时已创建）
+    # Submitting a processing job during capture must 409 (session dir already created).
     _, sess_now = http_req("GET", "/api/sessions")
     cur = next((s for s in sess_now["data"]
                 if s["name"] == EFFECTIVE_SESSION_NAME), None)
     if cur:
         check(cur["id"] == EFFECTIVE_SESSION_NAME,
-              "sessions 列表 id == effective session_name")
+              "sessions list id == effective session_name")
     if cur:
         _, r409 = http_req("POST", "/api/process/calibrate",
                            {"session_id": cur["id"]}, expect=409)
-        check(not r409.get("ok") and "拍摄进行中" in r409.get("error", ""),
-              "拍摄中提交 calibrate 返回 409")
+        check(not r409.get("ok") and "Capture in progress" in r409.get("error", ""),
+              "submitting calibrate during capture returns 409")
 
-    # waiting_user 期间实时预览可用（人工对照直方图的场景）
+    # Live preview remains available during waiting_user (manual histogram check scenario).
     http_req("POST", "/api/live/start", {"fps": 10, "scale": 0.25, "quality": 60})
     try:
         stats_text, _ = asyncio.run(recv_live_pair())
-        check(bool(stats_text), "waiting_user 期间 /ws/live 有帧")
+        check(bool(stats_text), "/ws/live has frames during waiting_user")
     except Exception as exc:  # noqa: BLE001
-        check(False, f"waiting_user 期间收帧失败：{exc}")
+        check(False, f"frame receive failed during waiting_user: {exc}")
     http_req("POST", "/api/live/stop")
 
-    # /ws/events：resume 后应推送 capture 状态变化
+    # /ws/events: resume must push a capture state change.
     async def resume_and_listen():
         import websockets
         uri = f"ws://127.0.0.1:{PORT}/ws/events"
         async with websockets.connect(uri, open_timeout=10) as ws:
             snapshot = json.loads(await asyncio.wait_for(ws.recv(), 10))
             assert snapshot.get("topic") == "capture"
-            # resume 触发状态推送
+            # resume triggers a state push
             status, _ = http_req("POST", "/api/capture/resume")
             assert status == 200
             deadline = time.time() + 15
@@ -561,34 +561,34 @@ def step_capture():
     try:
         event_msg = asyncio.run(resume_and_listen())
     except Exception as exc:  # noqa: BLE001
-        check(False, f"/ws/events 或 resume 失败：{exc}")
+        check(False, f"/ws/events or resume failed: {exc}")
         event_msg = None
         http_req("POST", "/api/capture/resume")
     check(event_msg is not None and event_msg["topic"] == "capture",
-          "/ws/events 推送 capture 状态变化（resume→capturing）")
+          "/ws/events pushes capture state change (resume->capturing)")
     if event_msg:
         check(event_msg["data"].get("needs_user") is False,
-              "/ws/events capture 消息含 needs_user=false（已 resume）")
+              "/ws/events capture message has needs_user=false (after resume)")
     _, r_again = http_req("POST", "/api/capture/resume", expect=409)
-    check(not r_again.get("ok"), "capturing 中再次 resume 返回 409")
+    check(not r_again.get("ok"), "resume again during capturing returns 409")
 
     state = poll_state(lambda s: s.get("status") == "finished", timeout=90)
-    check(state.get("status") == "finished", "拍摄完成（finished）")
+    check(state.get("status") == "finished", "capture finished")
     check(state.get("frames_done") == 12, "frames_done == 12")
-    # 从 sessions 列表取 id
+    # Pick id from sessions list.
     _, sess = http_req("GET", "/api/sessions")
     sids = [s["id"] for s in sess["data"] if s["name"] == EFFECTIVE_SESSION_NAME]
-    check(bool(sids), "sessions 列表包含本次会话（name=effective）")
+    check(bool(sids), "sessions list contains this capture (name=effective)")
     if sids:
         SESSION_ID = sids[0]
         check(SESSION_ID == EFFECTIVE_SESSION_NAME,
-              "sessions 列表 id == effective session_name")
+              "sessions list id == effective session_name")
         target = next(s for s in sess["data"] if s["id"] == SESSION_ID)
         check(target["name"] == EFFECTIVE_SESSION_NAME,
-              "sessions 列表 name 使用 effective")
+              "sessions list name uses effective name")
         fc = target["frame_counts"]
         check(fc == {"bias": 3, "dark": 3, "flat": 3, "light": 3},
-              "frame_counts 各相位 3 帧")
+              "frame_counts are 3 per phase")
 
 
 def step_session_files():
@@ -596,21 +596,21 @@ def step_session_files():
     d = detail["data"]
     check(d.get("id") == EFFECTIVE_SESSION_NAME
           and d.get("name") == EFFECTIVE_SESSION_NAME,
-          "session 详情的 id 与 name 使用 effective")
-    check(len(d["phases"]) == 4, "session 详情含 4 个 phase")
+          "session detail id and name use effective name")
+    check(len(d["phases"]) == 4, "session detail contains 4 phases")
     for g in ("bias", "dark", "flat", "light"):
         frames = d["frames"].get(g, [])
         check(len(frames) == 3, f"frames.{g} == 3")
         if frames:
             f0 = frames[0]
             check(all(k in f0 for k in ("file", "url", "thumb", "mean", "std",
-                                        "saturated_pct")), f"{g} 帧字段齐全")
-            check(isinstance(f0["mean"], (int, float)), f"{g} 帧含 mean 统计")
+                                        "saturated_pct")), f"{g} frame fields complete")
+            check(isinstance(f0["mean"], (int, float)), f"{g} frame contains mean stat")
     f0 = d["frames"]["bias"][0]
     status, body, headers = raw_response(f0["url"])
-    check(status == 200 and body[:6] == b"SIMPLE", "FITS 文件可下载（SIMPLE 头）")
+    check(status == 200 and body[:6] == b"SIMPLE", "FITS file downloadable (SIMPLE header)")
     check(headers.get("cache-control") == "no-store",
-          "GET /api/files 响应头含 Cache-Control: no-store")
+          "GET /api/files response has Cache-Control: no-store")
     try:
         from astropy.io import fits
         with fits.open(REPO / "data" / "captures" / SESSION_ID
@@ -621,58 +621,58 @@ def step_session_files():
                          "TEMP", "FRAMETYP", "CAMERA", "SERIAL",
                          "SESSION", "NFRAME")
         check(all(k in hdr for k in required_keys),
-              "FITS 头含契约要求的 10 个关键字")
+              "FITS header contains the 10 contract keywords")
         check(hdr.get("BITPIX") == 16 and int(data.max()) <= 4095,
-              "FITS 为 16-bit 且数据在低 12 位（max ≤ 4095）")
+              "FITS is 16-bit with data in the low 12 bits (max <= 4095)")
         check("." in str(hdr.get("DATE-OBS", "")),
-              "DATE-OBS 精确到毫秒（含小数秒）")
+              "DATE-OBS has millisecond precision (fractional seconds)")
     except Exception as exc:  # noqa: BLE001
-        check(False, f"FITS 头校验异常：{exc}")
+        check(False, f"FITS header validation failed: {exc}")
     status, body = raw_request(f0["thumb"])
-    check(status == 200 and body[:4] == b"\x89PNG", "缩略图 PNG 可下载")
+    check(status == 200 and body[:4] == b"\x89PNG", "thumbnail PNG downloadable")
     status, body, headers = raw_response(f"/api/files/{SESSION_ID}/meta.json")
     check(status == 200 and json.loads(body).get("name") == EFFECTIVE_SESSION_NAME,
-          "meta.json 可下载且 name 为 effective")
+          "meta.json downloadable and name is effective")
     check(headers.get("cache-control") == "no-store",
-          "meta.json 响应头含 Cache-Control: no-store")
+          "meta.json response has Cache-Control: no-store")
 
     status, body = raw_request(f"/api/files/{SESSION_ID}/bias/../meta.json")
-    check(status == 400, "路径穿越（bias/../meta.json）被拒绝为 400")
+    check(status == 400, "path traversal (bias/../meta.json) rejected with 400")
     status, body = raw_request(f"/api/files/../../etc/passwd")
-    check(status in (400, 404), "非法 session_id 被拒绝")
+    check(status in (400, 404), "invalid session_id rejected")
 
 
 def step_processing():
-    # 排除不存在的文件 → 400（中文错误）
+    # Excluding a nonexistent file -> 400 (English error).
     status, bad = http_req("POST", "/api/process/calibrate",
                            {"session_id": SESSION_ID, "sigma": 3, "method": "mean",
                             "exclude": {"light": ["NOPE_0001.fits"]}},
                            expect=400)
     check(status == 400 and not bad.get("ok")
-          and "不存在" in bad.get("error", ""),
-          "exclude 不存在的文件返回 400（中文错误）")
+          and "does not exist" in bad.get("error", ""),
+          "excluding a nonexistent file returns 400 (English error)")
 
     _, r = http_req("POST", "/api/process/calibrate",
                     {"session_id": SESSION_ID, "sigma": 3, "method": "mean"})
     job_id = r["data"]["job_id"]
     job = poll_job(job_id)
-    check(job["status"] == "done", f"calibrate 完成（{job.get('message')}）")
+    check(job["status"] == "done", f"calibrate done ({job.get('message')})")
     check(job.get("progress") == 100, "calibrate progress == 100")
     masters = (job.get("result") or {}).get("masters", {})
     check(all(masters.get(k) for k in ("bias", "dark", "flat")),
-          "master bias/dark/flat 全部生成")
+          "master bias/dark/flat all generated")
     check((job.get("result") or {}).get("calibrated_count") == 3,
           "calibrated_count == 3")
     excl = (job.get("result") or {}).get("excluded_counts") or {}
     check(excl == {"bias": 0, "dark": 0, "flat": 0, "light": 0},
-          "calibrate result 含 excluded_counts（全 0）")
+          "calibrate result contains excluded_counts (all 0)")
 
-    # masters/ 目录文件可直接访问
+    # Files under masters/ are directly accessible.
     status, body = raw_request(f"/api/files/{SESSION_ID}/masters/MASTER_DARK.fits")
     check(status == 200 and body[:6] == b"SIMPLE",
-          "/api/files 可访问 masters/MASTER_DARK.fits")
+          "/api/files can access masters/MASTER_DARK.fits")
 
-    # v1.1 exclude：stack 排除一张 light（数组含重复，后端应去重）后 frames=2
+    # v1.1 exclude: stack excludes one light (array with duplicates is deduped) -> frames=2
     _, r = http_req("POST", "/api/process/stack",
                     {"session_id": SESSION_ID, "sigma": 3, "method": "mean",
                      "registration": True,
@@ -681,21 +681,21 @@ def step_processing():
                                            "LIGHT_0003.fits"]}})
     job_id = r["data"]["job_id"]
     job = poll_job(job_id)
-    check(job["status"] == "done", f"stack 完成（{job.get('message')}）")
+    check(job["status"] == "done", f"stack done ({job.get('message')})")
     res = job.get("result") or {}
-    check(res.get("file") == "STACK_sigma3.fits", "stack 输出 STACK_sigma3.fits")
+    check(res.get("file") == "STACK_sigma3.fits", "stack outputs STACK_sigma3.fits")
     qc = res.get("qc") or {}
     for k in ("frames", "total_exposure_us", "effective_bits", "rejected_pct",
               "background_std", "excluded_counts"):
-        check(k in qc, f"qc_report 含 {k}")
+        check(k in qc, f"qc_report contains {k}")
     check(qc.get("frames") == 2 and qc.get("total_exposure_us") == 6000,
-          "qc：排除 1 张 light 后 frames=2、total_exposure_us=6000")
+          "qc: frames=2 and total_exposure_us=6000 after excluding one light")
     check((qc.get("excluded_counts") or {}).get("light") == 1,
           "qc.excluded_counts.light == 1")
     check((res.get("excluded_counts") or {}).get("light") == 1,
           "stack result.excluded_counts.light == 1")
 
-    # STACK 为 float32（BITPIX=-32）
+    # STACK is float32 (BITPIX=-32).
     try:
         from astropy.io import fits
         with fits.open(REPO / "data" / "captures" / SESSION_ID
@@ -704,37 +704,37 @@ def step_processing():
             stack_data = hdul[0].data
         check(stack_bitpix == -32 and np.dtype(stack_data.dtype).kind == "f"
               and stack_data.dtype.itemsize == 4,
-              "STACK_sigma3.fits 为 float32（BITPIX=-32）")
+              "STACK_sigma3.fits is float32 (BITPIX=-32)")
     except Exception as exc:  # noqa: BLE001
-        check(False, f"STACK 精度校验异常：{exc}")
+        check(False, f"STACK precision validation failed: {exc}")
 
     _, r = http_req("POST", "/api/process/stretch",
                     {"session_id": SESSION_ID, "result_file": "STACK_sigma3.fits",
                      "stretch": "asinh", "black": 0, "white": 4095})
     job_id = r["data"]["job_id"]
     job = poll_job(job_id)
-    check(job["status"] == "done", f"stretch 完成（{job.get('message')}）")
+    check(job["status"] == "done", f"stretch done ({job.get('message')})")
     sres = job.get("result") or {}
-    check("asinh" in sres.get("file", ""), "stretch 输出 16-bit FITS 结果")
+    check("asinh" in sres.get("file", ""), "stretch outputs 16-bit FITS result")
     if sres.get("preview_url"):
         status, body = raw_request(sres["preview_url"])
-        check(status == 200 and body[:4] == b"\x89PNG", "STACK_preview.png 可下载")
+        check(status == 200 and body[:4] == b"\x89PNG", "STACK_preview.png downloadable")
     if sres.get("url"):
         status, body = raw_request(sres["url"])
-        check(status == 200 and body[:6] == b"SIMPLE", "拉伸结果 FITS 可下载")
+        check(status == 200 and body[:6] == b"SIMPLE", "stretched result FITS downloadable")
 
     _, detail = http_req("GET", f"/api/sessions/{SESSION_ID}")
     d = detail["data"]
-    check(len(d["results"]) >= 2, "session 详情 results ≥ 2（stack + 拉伸结果）")
+    check(len(d["results"]) >= 2, "session detail results >= 2 (stack + stretched result)")
     check(isinstance(d["qc"], dict) and d["qc"].get("frames") == 2,
-          "session 详情返回 qc_report（frames=2，含 excluded_counts）")
+          "session detail returns qc_report (frames=2, includes excluded_counts)")
 
 
 def main():
     global BASE, PORT, PROC
     PORT = free_port()
     BASE = f"http://127.0.0.1:{PORT}"
-    print(f"启动 uvicorn 子进程（端口 {PORT}）…")
+    print(f"Starting uvicorn subprocess on port {PORT} ...")
     PROC = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
@@ -753,11 +753,11 @@ def main():
 
         http_req("POST", "/api/device/close")
         _, r = http_req("GET", "/api/capture/state")
-        check(r["data"]["status"] == "finished", "收尾：关闭设备后状态仍可查询")
+        check(r["data"]["status"] == "finished", "final: state still queryable after device close")
     except Exception as exc:  # noqa: BLE001
         import traceback
         traceback.print_exc()
-        check(False, f"自测异常：{exc}")
+        check(False, f"self test exception: {exc}")
     finally:
         PROC.terminate()
         try:
@@ -767,13 +767,13 @@ def main():
 
     failed = [m for ok, m in RESULTS if not ok]
     print("\n" + "=" * 60)
-    print(f"SMOKE 结果：{len(RESULTS) - len(failed)}/{len(RESULTS)} 通过")
+    print(f"SMOKE result: {len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
     if failed:
-        print("失败项：")
+        print("Failed checks:")
         for m in failed:
             print("  - " + m)
         return 1
-    print("全部通过 ✅")
+    print("All checks passed ✅")
     return 0
 
 

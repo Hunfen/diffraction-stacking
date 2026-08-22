@@ -55,7 +55,7 @@ export default function SettingsPage() {
       setDataRootInput(settings.data_root);
     } catch (err) {
       setDataDir(null);
-      setDataDirError(err instanceof Error ? err.message : '无法加载数据目录设置');
+      setDataDirError(err instanceof Error ? err.message : 'Unable to load data directory settings');
     } finally {
       setDataDirLoading(false);
     }
@@ -64,7 +64,7 @@ export default function SettingsPage() {
   const saveDataDir = async () => {
     const dataRoot = dataRootInput.trim();
     if (!dataRoot) {
-      message.warning('请输入数据目录的绝对路径');
+      message.warning('Please enter the absolute path of the data directory');
       return;
     }
     setDataDirSaving(true);
@@ -73,10 +73,10 @@ export default function SettingsPage() {
       const next = await apiPut<DataDirSettings>('/api/settings', { data_root: dataRoot });
       setDataDir(next);
       setDataRootInput(next.data_root);
-      message.success(`数据目录已保存：${next.data_root}`);
+      message.success(`Data directory saved: ${next.data_root}`);
     } catch (err) {
       // 400 等失败时展示后端 error（apiPut 非 silent 已同时弹出 message.error）
-      setDataDirError(err instanceof Error ? err.message : '保存失败，请检查后端返回的错误信息');
+      setDataDirError(err instanceof Error ? err.message : 'Failed to save. Please check the error returned by the backend');
     } finally {
       setDataDirSaving(false);
     }
@@ -96,7 +96,7 @@ export default function SettingsPage() {
       setHealthStatus('ok');
     } catch (err) {
       setHealth(null);
-      setHealthError(err instanceof Error ? err.message : '无法连接后端服务');
+      setHealthError(err instanceof Error ? err.message : 'Unable to connect to the backend service');
       setHealthStatus('error');
     }
   };
@@ -115,7 +115,7 @@ export default function SettingsPage() {
     const normalized = normalizeBackend(backendInput);
     setBackend(normalized);
     setBackendInput(normalized);
-    message.success(`后端地址已保存：${normalized}（WS / 图片 URL 立即生效，REST 在 dev 走 vite 代理）`);
+    message.success(`Backend address saved: ${normalized} (takes effect immediately for WS / image URLs; REST goes through the Vite proxy in dev)`);
     void checkHealth(normalized);
   };
 
@@ -123,7 +123,7 @@ export default function SettingsPage() {
     const next = normalizePreviewSettings(preview);
     setPreviewSettings(next);
     setPreview(next);
-    message.success('预览参数已保存（fps/quality 取整、scale 收敛到 0.25/0.5/1.0），重新进入 /live 或刷新页面后生效');
+    message.success('Preview settings saved (fps/quality rounded, scale snapped to 0.25/0.5/1.0). Takes effect when you re-enter /live or refresh the page');
   };
 
   return (
@@ -132,7 +132,7 @@ export default function SettingsPage() {
         title={
           <Space>
             <CloudServerOutlined />
-            后端地址
+            Backend Address
           </Space>
         }
       >
@@ -149,7 +149,7 @@ export default function SettingsPage() {
           <Col>
             <Space>
               <Button type="primary" icon={<SaveOutlined />} onClick={saveBackend}>
-                保存（localStorage 持久化）
+                Save (persisted in localStorage)
               </Button>
               <Button
                 onClick={() => {
@@ -157,19 +157,20 @@ export default function SettingsPage() {
                   clearBackend();
                   const effective = getBackend();
                   setBackendInput(effective);
-                  message.success(`已清除本地后端覆盖，当前生效地址：${effective}`);
+                  message.success(`Local backend override cleared. Effective address: ${effective}`);
                   void checkHealth(effective);
                 }}
               >
-                恢复默认（不清除 env 注入）
+                Restore Default (does not clear env injection)
               </Button>
             </Space>
           </Col>
         </Row>
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          当前生效地址：{getBackend()}。dev 模式下 REST 请求经 vite 代理（目标由启动时 VITE_BACKEND / 默认
-          localhost:8000 决定）；WS 实时流与图片/文件 URL 直接使用这里保存的地址，修改后立即生效。
-          生产模式下 FastAPI 托管 frontend/dist，同源访问。
+          Effective address: {getBackend()}. In dev mode REST requests go through the Vite proxy (target determined
+          at startup by VITE_BACKEND / the default localhost:8000); the WS live stream and image/file URLs use the
+          address saved here directly, so changes take effect immediately. In production, FastAPI serves frontend/dist
+          and everything is same-origin.
         </Typography.Paragraph>
       </Card>
 
@@ -177,7 +178,7 @@ export default function SettingsPage() {
         title={
           <Space>
             <DatabaseOutlined />
-            数据目录
+            Data Directory
           </Space>
         }
         loading={dataDirLoading}
@@ -188,7 +189,7 @@ export default function SettingsPage() {
               size="large"
               value={dataRootInput}
               onChange={(e) => setDataRootInput(e.target.value)}
-              placeholder="请输入数据目录绝对路径，例如 /Users/me/astro-data"
+              placeholder="Enter the absolute path of the data directory, e.g. /Users/me/astro-data"
               addonBefore="PATH"
             />
           </Col>
@@ -200,10 +201,10 @@ export default function SettingsPage() {
                 loading={dataDirSaving}
                 onClick={() => void saveDataDir()}
               >
-                保存
+                Save
               </Button>
               <Button icon={<ReloadOutlined />} onClick={() => void loadDataDir()}>
-                重新加载
+                Reload
               </Button>
             </Space>
           </Col>
@@ -212,7 +213,7 @@ export default function SettingsPage() {
           <Descriptions bordered size="small" column={2} style={{ marginTop: 12 }}>
             <Descriptions.Item label="data_root">{dataDir.data_root}</Descriptions.Item>
             <Descriptions.Item label="writable">
-              <Tag color={dataDir.writable ? 'green' : 'red'}>{dataDir.writable ? 'true（可写）' : 'false（只读）'}</Tag>
+              <Tag color={dataDir.writable ? 'green' : 'red'}>{dataDir.writable ? 'true (writable)' : 'false (read-only)'}</Tag>
             </Descriptions.Item>
           </Descriptions>
         )}
@@ -221,24 +222,25 @@ export default function SettingsPage() {
             style={{ marginTop: 12 }}
             type="error"
             showIcon
-            message="数据目录设置操作失败"
+            message="Data directory settings operation failed"
             description={dataDirError}
           />
         )}
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          修改后新拍摄写入新目录，旧数据留在原目录。保存成功以 PUT /api/settings 返回的 data_root / writable
-          为准；非法路径或目录创建失败时后端返回 400 错误。
+          After changing, new captures are written to the new directory while old data stays in the original
+          directory. A successful save is confirmed by the data_root / writable values returned from PUT /api/settings;
+          an invalid path or directory creation failure returns a 400 error from the backend.
         </Typography.Paragraph>
       </Card>
 
-      <Card title="后端健康状态">
+      <Card title="Backend Health">
         <Space style={{ marginBottom: 12 }}>
           <Badge
             status={healthStatus === 'ok' ? 'success' : healthStatus === 'error' ? 'error' : 'processing'}
-            text={healthStatus === 'ok' ? '健康' : healthStatus === 'error' ? '异常 / 不可达' : '检查中…'}
+            text={healthStatus === 'ok' ? 'Healthy' : healthStatus === 'error' ? 'Unhealthy / Unreachable' : 'Checking…'}
           />
           <Button icon={<ReloadOutlined />} onClick={() => void checkHealth()}>
-            重新检查
+            Recheck
           </Button>
         </Space>
         {healthStatus === 'ok' && health ? (
@@ -256,19 +258,20 @@ export default function SettingsPage() {
           </Descriptions>
         ) : (
           healthStatus === 'error' && (
-            <Alert type="error" showIcon message="后端健康检查失败" description={healthError || '无法连接'} />
+            <Alert type="error" showIcon message="Backend health check failed" description={healthError || 'Unable to connect'} />
           )
         )}
         <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          健康检查直接请求「后端地址 + /api/health」。dev 下如浏览器提示 CORS，请确认后端已允许跨域或使用 vite
-          代理目标一致的后端地址。
+          The health check directly requests "backend address + /api/health". If the browser reports CORS errors in
+          dev, make sure the backend allows cross-origin requests or use a backend address matching the Vite proxy
+          target.
         </Typography.Paragraph>
       </Card>
 
-      <Card title="预览参数（/live 使用）">
+      <Card title="Preview Parameters (used by /live)">
         <Row gutter={24}>
           <Col xs={24} md={8}>
-            <Typography.Text strong>FPS（≤30）</Typography.Text>
+            <Typography.Text strong>FPS (≤30)</Typography.Text>
             <InputNumber
               min={1}
               max={30}
@@ -280,7 +283,7 @@ export default function SettingsPage() {
             />
           </Col>
           <Col xs={24} md={8}>
-            <Typography.Text strong>JPEG 质量（10–100，整数）</Typography.Text>
+            <Typography.Text strong>JPEG Quality (10–100, integer)</Typography.Text>
             <InputNumber
               min={10}
               max={100}
@@ -292,7 +295,7 @@ export default function SettingsPage() {
             />
           </Col>
           <Col xs={24} md={8}>
-            <Typography.Text strong>缩放 scale（0.25 / 0.5 / 1.0）</Typography.Text>
+            <Typography.Text strong>Scale (0.25 / 0.5 / 1.0)</Typography.Text>
             <InputNumber
               min={0.25}
               max={1}
@@ -304,11 +307,11 @@ export default function SettingsPage() {
           </Col>
         </Row>
         <Button type="primary" icon={<SaveOutlined />} style={{ marginTop: 16 }} onClick={savePreview}>
-          保存预览参数
+          Save Preview Settings
         </Button>
         <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-          默认值：fps={DEFAULT_PREVIEW.fps}，quality={DEFAULT_PREVIEW.quality}，scale={DEFAULT_PREVIEW.scale}。
-          这些参数在进入 /live 时通过 POST /api/live/start 发给后端。
+          Defaults: fps={DEFAULT_PREVIEW.fps}, quality={DEFAULT_PREVIEW.quality}, scale={DEFAULT_PREVIEW.scale}.
+          These parameters are sent to the backend via POST /api/live/start when entering /live.
         </Typography.Paragraph>
       </Card>
     </Space>

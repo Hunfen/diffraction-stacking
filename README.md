@@ -1,6 +1,7 @@
-# Diffraction Stacking
+# Static AstroPhoto
 
-面向 **LEED / RHEED 静态电子衍射点** 的采集与处理系统。
+**Static AstroPhoto** 是面向 **LEED / RHEED 静态电子衍射点** 的采集与处理系统
+（Diffraction Stacking）。
 借用深空摄影的 **Bias / Dark / Flat 标定 + 多帧 Sigma 叠加** 方法提升弱衍射点的信噪比与动态范围，
 目标静止，因此**无需赤道仪、导星、去旋转**。
 
@@ -20,7 +21,7 @@
 
 - 实时预览：WebSocket 推送 JPEG 帧 + 逐帧统计（min/max/mean/std/饱和比例/256-bin 直方图）
 - 参数面板：曝光 / 增益 / 黑电平 / ROI / 镜像 / 触发等即调即生效，显示相机实际返回值
-- 四相位序列拍摄：`BIAS → DARK → FLAT → LIGHT`，每相位有中文引导提示；
+- 四相位序列拍摄：`BIAS → DARK → FLAT → LIGHT`，每相位有引导提示；
   **LIGHT 前强制人工对照实时直方图确认参数**（中心束过曝程度由人工判断）
 - 坏帧排除：处理时按文件名 `exclude`，前后端真实生效
 - 处理任务：calibrate / stack / stretch 后台 job 化，进度经 WebSocket 推送
@@ -66,6 +67,8 @@ flowchart LR
 │       ├── api/            # axios 封装、WS 客户端、类型、状态机
 │       └── pages/          # Connect / Live / Capture / Processing / Settings
 ├── scripts/
+│   ├── install.sh          # 一键安装（macOS / Linux / WSL，幂等）
+│   ├── install.ps1         # 一键安装（Windows PowerShell；-WithCamera 装真机依赖）
 │   └── backend_smoke.py    # 后端端到端自测（Mock 全流程）
 ├── docs/
 │   ├── architecture.md     # 架构设计 v0.3
@@ -82,61 +85,64 @@ flowchart LR
 
 | 用途 | 要求 |
 |---|---|
+| 安装脚本 | Python ≥ 3.10（优先 3.12 / 3.11，需能创建 venv）+ Node.js ≥ 20 与 npm |
 | 后端（真机） | Windows 10/11 + Python 3.10+（推荐 3.12）+ ic4 驱动 |
-| 后端（开发） | macOS / Linux + Python 3.12（自动使用 Mock 相机） |
-| 前端 | Node.js ≥ 20（推荐 22+）与 npm |
+| 后端（开发） | macOS / Linux / WSL + Python 3.12（自动使用 Mock 相机） |
+| 前端 | Node.js ≥ 20（推荐 22+）与 npm（由安装脚本自动安装依赖并构建） |
 | 相机 | DMK 33GX249e（可选；没有也能用 Mock 跑通全部功能） |
 
 ### 1. 克隆
 
 ```bash
-git clone <your-repo-url> diffraction-stacking
-cd diffraction-stacking
+git clone <your-repo-url> static-astrophoto
+cd static-astrophoto
 ```
 
-### 2. 后端
+### 2. 一键安装（克隆后直接执行）
 
-macOS / Linux（Mock 开发模式）：
+macOS / Linux / WSL：
+
+```bash
+./scripts/install.sh
+```
+
+Windows PowerShell（Mock 模式；真机加 `-WithCamera` 额外安装 imagingcontrol4）：
+
+```powershell
+.\scripts\install.ps1
+.\scripts\install.ps1 -WithCamera   # 真机模式
+```
+
+脚本幂等，可安全重复执行。它会：
+
+1. 自动选择 Python（优先 3.12 / 3.11，要求 ≥ 3.10）并创建 `backend/.venv`，
+   升级 pip 后安装 `backend/requirements.txt`（已有可用 venv 时直接复用，不重复装依赖）；
+2. 检测 Node.js / npm，在 `frontend/` 执行 `npm install`（cache 异常时输出修复命令）与 `npm run build`；
+3. 创建 `data/snapshots` 与 `data/captures` 目录。
+
+> 前端联调（可选）：`cd frontend && npm run dev` 启动 Vite（http://localhost:5173），
+> 代理 `/api`、`/ws` 到 `http://localhost:8000`。
+
+### 3. 启动
+
+macOS / Linux / WSL（Mock 相机）：
 
 ```bash
 cd backend
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Windows（DMK 33GX249e 真机）：
+Windows：
 
 ```powershell
 cd backend
-py -3.12 -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install imagingcontrol4        # ic4 官方 Python 绑定
 .venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+浏览器打开 **http://localhost:8000**（安装脚本已构建前端，FastAPI 直接托管 `frontend/dist/`）。
+
 > 真机前置：安装 The Imaging Source 的 ic4 驱动并绑定 GigE 网卡，建议开启 Jumbo Frame（9000 MTU）；
 > 详见 [backend/README.md](backend/README.md)。
-
-### 3. 前端
-
-开发模式（热更新，Vite 代理 `/api`、`/ws` 到 `http://localhost:8000`）：
-
-```bash
-cd frontend
-npm install
-npm run dev      # http://localhost:5173
-```
-
-生产模式（构建后由 FastAPI 托管，单端口部署）：
-
-```bash
-cd frontend
-npm install
-npm run build    # 产物在 frontend/dist/
-# 重启后端后访问 http://<主机>:8000
-```
 
 ### 4. 使用流程
 

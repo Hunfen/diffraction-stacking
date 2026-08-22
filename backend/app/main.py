@@ -119,14 +119,14 @@ class LiveService:
 
     def start(self, fps: int, scale: float, quality: int) -> dict:
         if self.streaming:
-            raise RuntimeError("实时流已在运行")
+            raise RuntimeError("Live stream is already running")
         self.camera.ensure_device()
         if not isinstance(fps, int) or not (1 <= fps <= 30):
-            raise RuntimeError("fps 必须在 1–30 之间")
+            raise RuntimeError("fps must be between 1 and 30")
         if scale not in (1.0, 0.5, 0.25):
-            raise RuntimeError("scale 仅支持 1.0 / 0.5 / 0.25")
+            raise RuntimeError("scale only supports 1.0 / 0.5 / 0.25")
         if not isinstance(quality, int):
-            raise RuntimeError("quality 必须是整数")
+            raise RuntimeError("quality must be an integer")
         quality = max(10, min(quality, 100))
         self.params = {"fps": fps, "scale": scale, "quality": quality}
         self.streaming = True
@@ -228,7 +228,7 @@ async def lifespan(app: FastAPI):
     camera_service.close()
 
 
-app = FastAPI(title="Diffraction Stacking 后端", version=APP_VERSION,
+app = FastAPI(title="Static AstroPhoto", version=APP_VERSION,
               lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
@@ -246,7 +246,7 @@ app.add_middleware(
 async def validation_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content={
         "ok": False, "data": None,
-        "error": "请求参数校验失败：" + str(exc.errors()[:3])})
+        "error": "Request validation failed: " + str(exc.errors()[:3])})
 
 
 @app.exception_handler(Exception)
@@ -254,7 +254,7 @@ async def generic_handler(request: Request, exc: Exception):
     logging.getLogger("uvicorn.error").exception(
         "unhandled exception on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={
-        "ok": False, "data": None, "error": "服务器内部错误"})
+        "ok": False, "data": None, "error": "Internal server error"})
 
 
 def raise_cam_err(exc: Exception) -> None:
@@ -266,24 +266,25 @@ def raise_cam_err(exc: Exception) -> None:
         # 契约：500 统一返回“服务器内部错误”，不向客户端泄漏异常细节
         logging.getLogger("uvicorn.error").error(
             "ic4 camera error: %s", exc, exc_info=True)
-        raise HTTPException(500, "服务器内部错误")
+        raise HTTPException(500, "Internal server error")
     if status in (400, 404, 409, 503):
         raise HTTPException(status, msg)
-    if "设备未打开" in msg or "设备已关闭" in msg:
+    if "Device is not open" in msg or "Device is closed" in msg:
         raise HTTPException(409, msg)
-    if "无法加载 imagingcontrol4" in msg:
+    if "Unable to load imagingcontrol4" in msg:
         raise HTTPException(503, msg)
-    if "设备不存在" in msg:
+    if "Device does not exist" in msg:
         raise HTTPException(404, msg)
-    if any(k in msg for k in ("仅支持", "必须在", "未知属性", "只读", "需要数值",
-                              "必须是整数")):
+    if any(k in msg for k in ("only supports", "must be", "Unknown property",
+                              "is read-only", "requires a numeric value",
+                              "must be an integer")):
         raise HTTPException(400, msg)
-    if "实时流已在运行" in msg:
+    if "Live stream is already running" in msg:
         raise HTTPException(409, msg)
     # 未分类的相机错误：只记日志，不向客户端泄漏异常细节
     logging.getLogger("uvicorn.error").error(
         "unclassified camera error: %s", exc, exc_info=True)
-    raise HTTPException(500, "服务器内部错误")
+    raise HTTPException(500, "Internal server error")
 
 
 # =========================================================================
@@ -366,21 +367,21 @@ def settings_get():
 def settings_put(body: SettingsBody):
     raw = body.data_root.strip()
     if not raw:
-        raise HTTPException(400, "data_root 不能为空")
+        raise HTTPException(400, "data_root must not be empty")
     root = Path(raw)
     if not root.is_absolute():
-        raise HTTPException(400, "data_root 必须是绝对路径")
+        raise HTTPException(400, "data_root must be an absolute path")
     root = root.resolve()
     try:
         root.mkdir(parents=True, exist_ok=True)
         (root / "snapshots").mkdir(parents=True, exist_ok=True)
         (root / "captures").mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise HTTPException(400, f"无法创建数据目录：{exc}")
+        raise HTTPException(400, f"Failed to create data directory: {exc}")
     try:
         set_data_root(root)
     except OSError as exc:
-        raise HTTPException(400, f"保存数据目录设置失败：{exc}")
+        raise HTTPException(400, f"Failed to save data directory setting: {exc}")
     return ok({"data_root": str(get_data_root()),
                "writable": is_data_root_writable(root)})
 
@@ -395,7 +396,7 @@ def device_open(body: OpenBody):
     cam_id = body.id.strip()
     known = [d["id"] for d in camera_service.list_devices()]
     if cam_id not in known:
-        raise HTTPException(404, f"设备不存在：{cam_id}")
+        raise HTTPException(404, f"Device does not exist: {cam_id}")
     try:
         cam = camera_service.open(cam_id)
     except Exception as exc:  # noqa: BLE001
@@ -478,14 +479,14 @@ def _snapshot_folder_name(folder: str | None) -> str:
     if not raw:
         return ""
     if raw.startswith("/") or raw.startswith("\\"):
-        raise HTTPException(400, "folder 必须是相对子目录名（不允许绝对路径）")
+        raise HTTPException(400, "folder must be a relative subdirectory name (absolute paths are not allowed)")
     if "/" in raw or "\\" in raw:
-        raise HTTPException(400, "folder 不允许包含路径分隔符")
+        raise HTTPException(400, "folder must not contain path separators")
     if raw == ".." or raw == ".":
-        raise HTTPException(400, "folder 不允许包含 . 或 .. 段")
+        raise HTTPException(400, "folder must not contain . or .. segments")
     bad = sorted(ch for ch in set(raw) if ch in _ILLEGAL_SNAPSHOT_FOLDER_CHARS)
     if bad:
-        raise HTTPException(400, f"folder 包含非法字符：{' '.join(bad)}")
+        raise HTTPException(400, f"folder contains illegal characters: {' '.join(bad)}")
     return raw
 
 
@@ -493,7 +494,7 @@ def _snapshot_folder_name(folder: str | None) -> str:
 def snapshot(body: SnapshotBody):
     fmt = body.format
     if fmt not in ("fits", "tiff", "png"):
-        raise HTTPException(400, "format 仅支持 fits|tiff|png")
+        raise HTTPException(400, "format only supports fits|tiff|png")
     folder = _snapshot_folder_name(body.folder)
     try:
         frame = camera_service.grab_frame()
@@ -513,14 +514,14 @@ def snapshot(body: SnapshotBody):
             try:
                 (get_snapshots_dir() / folder).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                raise HTTPException(400, f"无法创建快照文件夹：{exc}")
+                raise HTTPException(400, f"Failed to create snapshot folder: {exc}")
         return ok(save_snapshot(frame, fmt, cam_info, props, folder))
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("uvicorn.error").error(
             "snapshot save failed: %s", exc, exc_info=True)
-        raise HTTPException(500, "服务器内部错误")
+        raise HTTPException(500, "Internal server error")
 
 
 @app.get("/api/snapshot/folders")
@@ -546,7 +547,7 @@ def capture_plan(body: PlanBody):
     phases = [p.model_dump() for p in body.phases]
     for p in phases:
         if p["type"] not in ("bias", "dark", "flat", "light"):
-            raise HTTPException(400, f"未知相位类型：{p['type']}")
+            raise HTTPException(400, f"Unknown phase type: {p['type']}")
     try:
         plan = capture_service.plan(body.session_name, phases)
     except RuntimeError as exc:
@@ -596,28 +597,28 @@ def sessions():
 def session_detail(session_id: str):
     detail = get_session(session_id)
     if detail is None:
-        raise HTTPException(404, f"会话不存在：{session_id}")
+        raise HTTPException(404, f"Session does not exist: {session_id}")
     return ok(detail)
 
 
 def _validate_rel_path(session_id: str, rel_path: str) -> Path:
     if not session_id or ".." in session_id or "/" in session_id \
             or "\\" in session_id:
-        raise HTTPException(400, "非法路径：session_id 不合法")
+        raise HTTPException(400, "Invalid path: session_id is not allowed")
     if not rel_path or rel_path.startswith("/") or "\\" in rel_path \
             or any(part == ".." for part in rel_path.split("/")):
-        raise HTTPException(400, "非法路径")
+        raise HTTPException(400, "Invalid path")
     if session_id == "snapshots":
         # v1.3：允许根目录文件与 <folder>/<file> 单级子目录文件。
         base = get_snapshots_dir()
         parts = rel_path.split("/")
         if len(parts) > 2 or any(not p for p in parts):
-            raise HTTPException(400, "非法路径")
+            raise HTTPException(400, "Invalid path")
         path = base / rel_path
         resolved = path.resolve()
         if resolved.parent != base.resolve() \
                 and base.resolve() not in resolved.parents:
-            raise HTTPException(400, "非法路径")
+            raise HTTPException(400, "Invalid path")
         return path
     captures_dir = get_captures_dir()
     parts = rel_path.split("/")
@@ -626,18 +627,18 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
         path = captures_dir / session_id / "meta.json"
     elif len(parts) == 2 and parts[0] in groups | {"results"}:
         if not parts[1]:
-            raise HTTPException(400, "非法路径")
+            raise HTTPException(400, "Invalid path")
         path = captures_dir / session_id / parts[0] / parts[1]
     elif len(parts) == 3 and parts[0] in groups and parts[1] == "thumbs":
         if not parts[2]:
-            raise HTTPException(400, "非法路径")
+            raise HTTPException(400, "Invalid path")
         path = captures_dir / session_id / parts[0] / "thumbs" / parts[2]
     else:
-        raise HTTPException(400, "非法路径")
+        raise HTTPException(400, "Invalid path")
     session_base = (captures_dir / session_id).resolve()
     resolved = path.resolve()
     if resolved != session_base and session_base not in resolved.parents:
-        raise HTTPException(400, "非法路径")
+        raise HTTPException(400, "Invalid path")
     return path
 
 
@@ -645,7 +646,7 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
 def files(session_id: str, rel_path: str):
     path = _validate_rel_path(session_id, rel_path)
     if not path.is_file():
-        raise HTTPException(404, f"文件不存在：{rel_path}")
+        raise HTTPException(404, f"File does not exist: {rel_path}")
     media = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
     # v1.2：前端拉伸预览等场景依赖最新文件，禁止缓存。
     return FileResponse(path, media_type=media,
@@ -664,13 +665,13 @@ def _spawn_job(job_id: str) -> None:
 
 def _check_session(session_id: str) -> None:
     if get_session(session_id) is None:
-        raise HTTPException(404, f"会话不存在：{session_id}")
+        raise HTTPException(404, f"Session does not exist: {session_id}")
 
 
 def _ensure_capture_idle() -> None:
     status = capture_service.get_state()["status"]
     if status not in ("idle", "finished", "aborted", "error"):
-        raise HTTPException(409, "拍摄进行中，不能提交处理任务")
+        raise HTTPException(409, "Capture in progress, cannot submit processing job")
 
 
 def _validate_exclude(session_id: str, exclude: dict | None) -> dict:
@@ -678,25 +679,25 @@ def _validate_exclude(session_id: str, exclude: dict | None) -> dict:
     if exclude is None:
         return {}
     if not isinstance(exclude, dict):
-        raise HTTPException(400, "exclude 必须是对象")
+        raise HTTPException(400, "exclude must be an object")
     unknown = set(exclude.keys()) - set(EXCLUDE_GROUPS)
     if unknown:
-        raise HTTPException(400, f"exclude 含未知分组：{sorted(unknown)}")
+        raise HTTPException(400, f"exclude has unknown groups: {sorted(unknown)}")
     normalized: dict[str, list[str]] = {}
     for group in EXCLUDE_GROUPS:
         names = exclude.get(group) or []
         if not isinstance(names, list):
-            raise HTTPException(400, f"exclude.{group} 必须是数组")
+            raise HTTPException(400, f"exclude.{group} must be an array")
         clean = []
         for name in names:
             if not isinstance(name, str) or not name:
-                raise HTTPException(400, "exclude 中只能填文件名")
+                raise HTTPException(400, "exclude entries must be file names")
             if "/" in name or "\\" in name or ".." in name \
                     or Path(name).name != name:
-                raise HTTPException(400, f"exclude 只接受文件名（不含路径）：{name}")
+                raise HTTPException(400, f"exclude accepts only file names (no paths): {name}")
             target = get_captures_dir() / session_id / group / name
             if not target.is_file():
-                raise HTTPException(400, f"exclude 文件不存在：{group}/{name}")
+                raise HTTPException(400, f"exclude file does not exist: {group}/{name}")
             clean.append(name)
         normalized[group] = list(dict.fromkeys(clean))   # 去重保序
     return normalized
@@ -737,7 +738,7 @@ async def process_stretch(body: StretchBody):
 def process_job(job_id: str):
     job = process_service.get_job(job_id)
     if job is None:
-        raise HTTPException(404, f"任务不存在：{job_id}")
+        raise HTTPException(404, f"Job does not exist: {job_id}")
     return ok(job)
 
 
@@ -771,8 +772,9 @@ def root():
         return FileResponse(INDEX_HTML)
     return ok({
         "frontend_built": False,
-        "message": "前端未构建。请执行 cd frontend && npm run build 生成 dist/，"
-                   "或开发模式下访问 Vite dev server。API 文档见 /docs 与 docs/api.md。",
+        "message": ("Frontend is not built. Run `cd frontend && npm run build` "
+                    "to generate dist/, or use the Vite dev server during "
+                    "development. API docs: /docs and docs/api.md."),
     })
 
 

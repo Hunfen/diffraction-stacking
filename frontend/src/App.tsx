@@ -1,7 +1,4 @@
-import { Layout, Menu, Typography, ConfigProvider } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
-import dayjs from 'dayjs';
-import 'dayjs/locale/zh-cn';
+import { Layout, Menu, Typography } from 'antd';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import ConnectPage from './pages/ConnectPage';
 import LivePage from './pages/LivePage';
@@ -9,14 +6,12 @@ import CapturePage from './pages/CapturePage';
 import ProcessingPage from './pages/ProcessingPage';
 import SettingsPage from './pages/SettingsPage';
 
-dayjs.locale('zh-cn');
-
 const NAV_ITEMS = [
-  { key: '/connect', label: '设备连接' },
-  { key: '/live', label: '实时预览' },
-  { key: '/capture', label: '序列拍摄' },
-  { key: '/processing', label: '数据处理' },
-  { key: '/settings', label: '设置' },
+  { key: '/connect', label: 'Connect' },
+  { key: '/live', label: 'Live Preview' },
+  { key: '/capture', label: 'Capture' },
+  { key: '/processing', label: 'Processing' },
+  { key: '/settings', label: 'Settings' },
 ];
 
 function AppShell() {
@@ -30,7 +25,7 @@ function AppShell() {
     <Layout style={{ minHeight: '100vh' }}>
       <Layout.Header style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
         <Typography.Title level={4} style={{ color: '#fff', margin: 0, whiteSpace: 'nowrap' }}>
-          衍射采集与叠加
+          Static AstroPhoto
         </Typography.Title>
         <Menu
           theme="dark"
@@ -57,9 +52,5 @@ function AppShell() {
 }
 
 export default function App() {
-  return (
-    <ConfigProvider locale={zhCN}>
-      <AppShell />
-    </ConfigProvider>
-  );
+  return <AppShell />;
 }

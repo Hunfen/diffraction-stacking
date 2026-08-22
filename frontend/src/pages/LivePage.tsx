@@ -50,11 +50,11 @@ const SATURATION_WARN_THRESHOLD_PCT = 1.0;
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
 
 const statusMeta: Record<WsStatus, { color: string; text: string }> = {
-  idle: { color: 'default', text: '未启动' },
-  connecting: { color: 'processing', text: '连接中' },
-  open: { color: 'success', text: '已连接' },
-  reconnecting: { color: 'warning', text: '重连中' },
-  closed: { color: 'error', text: '已断开' },
+  idle: { color: 'default', text: 'Not Started' },
+  connecting: { color: 'processing', text: 'Connecting' },
+  open: { color: 'success', text: 'Connected' },
+  reconnecting: { color: 'warning', text: 'Reconnecting' },
+  closed: { color: 'error', text: 'Disconnected' },
 };
 
 interface RoiRect {
@@ -299,9 +299,9 @@ function NumericPropertyRow({
         </Space>
         <div>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            范围 {min}–{max}
+            Range {min}–{max}
             {prop.unit ? ` ${prop.unit}` : ''}
-            {actual !== undefined ? ` · 实际值 ${String(actual)}` : ''}
+            {actual !== undefined ? ` · Actual ${String(actual)}` : ''}
           </Typography.Text>
         </div>
       </Col>
@@ -387,7 +387,7 @@ function RoiNumberInput({
   return (
     <div>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        {prop.label}（{prop.name}）
+        {prop.label} ({prop.name})
       </Typography.Text>
       <InputNumber
         min={prop.min ?? 0}
@@ -594,13 +594,13 @@ export default function LivePage() {
     // 契约 v1.3：folders 会用 name="" 表达根目录（files=根目录文件数），去重合并为静态根目录项
     const root = snapshotFolders.find((f) => f.name === '');
     const options = [
-      { value: '', label: root ? `根目录（${root.files} 个文件）` : '根目录' },
-      { value: NEW_FOLDER_VALUE, label: '新建文件夹…' },
+      { value: '', label: root ? `Root folder (${root.files} files)` : 'Root folder' },
+      { value: NEW_FOLDER_VALUE, label: 'New folder…' },
       ...snapshotFolders
         .filter((f) => f.name !== '')
         .map((f) => ({
           value: f.name,
-          label: `${f.name}（${f.files} 个文件）`,
+          label: `${f.name} (${f.files} files)`,
         })),
     ];
     // localStorage 记住的文件夹若已不存在，也保留为可选项，避免 Select 显示裸值
@@ -616,7 +616,7 @@ export default function LivePage() {
 
   const takeSnapshot = async () => {
     if (snapshotFolder === NEW_FOLDER_VALUE && !newFolderName.trim()) {
-      message.error('请输入新建文件夹名称');
+      message.error('Please enter a new folder name');
       return;
     }
     const folder = snapshotFolder === NEW_FOLDER_VALUE ? newFolderName.trim() : snapshotFolder;
@@ -696,7 +696,7 @@ export default function LivePage() {
         await putProperty('offset_x', offsetX);
         await putProperty('offset_y', offsetY);
         await refresh();
-        message.success(`ROI 已设为 ${offsetX},${offsetY} ${width}×${height}`);
+        message.success(`ROI set to ${offsetX},${offsetY} ${width}×${height}`);
       } catch {
         /* 错误已由 api client 统一提示 */
       } finally {
@@ -738,7 +738,7 @@ export default function LivePage() {
       await putProperty('offset_x', snapRoi(0, roi.offsetX));
       await putProperty('offset_y', snapRoi(0, roi.offsetY));
       await refresh();
-      message.success('ROI 已重置为全画幅');
+      message.success('ROI reset to full frame');
     } catch {
       /* 错误已由 api client 统一提示 */
     } finally {
@@ -783,8 +783,8 @@ export default function LivePage() {
           type="info"
           showIcon
           closable
-          message="实时预览"
-          description="预览为 8-bit 灰阶自动对比度（1%~99% 分位线性映射），不修改相机采集参数。"
+          message="Live Preview"
+          description="The preview is an 8-bit grayscale auto-contrast image (1%–99% percentile linear stretch) and does not modify camera acquisition parameters."
           onClose={() => setAlertDismissed(true)}
         />
       )}
@@ -795,7 +795,7 @@ export default function LivePage() {
             size="small"
             title={
               <Space>
-                预览画面
+                Preview
                 {wsStatusTag(wsStatus)}
                 {streamStarted && <Tag color="green">streaming</Tag>}
               </Space>
@@ -816,11 +816,11 @@ export default function LivePage() {
                 onMouseMove={moveCanvasDrag}
                 onMouseUp={finishCanvasDrag}
               />
-              {!stats && wsStatus !== 'open' && <Empty description="等待视频流…" style={{ position: 'absolute', pointerEvents: 'none' }} />}
+              {!stats && wsStatus !== 'open' && <Empty description="Waiting for video stream…" style={{ position: 'absolute', pointerEvents: 'none' }} />}
             </div>
             {roiModel.available && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                按住鼠标在画面上拖动可框选拍摄区域；松手后按预览缩放比例换算并写入相机。
+                Drag on the image to select the capture region; releasing the mouse converts the selection by the preview scale and writes it to the camera.
               </Typography.Text>
             )}
           </Card>
@@ -828,7 +828,7 @@ export default function LivePage() {
 
         <Col xs={24} lg={8}>
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Card size="small" title="实时统计">
+            <Card size="small" title="Live Stats">
               {stats ? (
                 <>
                   <Row gutter={[12, 12]}>
@@ -845,13 +845,13 @@ export default function LivePage() {
                       <Statistic title="std" value={stats.std} precision={1} />
                     </Col>
                     <Col span={8}>
-                      <Statistic title="饱和 %" value={stats.saturated_pct} precision={2} suffix="%" />
+                      <Statistic title="Saturated %" value={stats.saturated_pct} precision={2} suffix="%" />
                     </Col>
                     <Col span={8}>
                       <Statistic title="FPS" value={stats.fps} precision={1} />
                     </Col>
                   </Row>
-                  <Divider style={{ margin: '12px 0' }}>Histogram（256 bin）</Divider>
+                  <Divider style={{ margin: '12px 0' }}>Histogram (256 bins)</Divider>
                   <div style={{ height: 180 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={histogramData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
@@ -859,7 +859,7 @@ export default function LivePage() {
                         <XAxis dataKey="bin" hide />
                         <YAxis hide />
                         <Tooltip
-                          formatter={(value: number) => [`${value} 像素`, 'count']}
+                          formatter={(value: number) => [`${value} pixels`, 'count']}
                           labelFormatter={(bin) => `bin ${bin}`}
                         />
                         <Bar dataKey="count" fill="#4dabf7" isAnimationActive={false} />
@@ -868,11 +868,11 @@ export default function LivePage() {
                   </div>
                 </>
               ) : (
-                <Empty description="暂无统计数据" />
+                <Empty description="No statistics yet" />
               )}
             </Card>
 
-            <Card size="small" title="抓拍（单帧）">
+            <Card size="small" title="Snapshot (Single Frame)">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <Space wrap>
                   <Select
@@ -889,8 +889,8 @@ export default function LivePage() {
                   <Button
                     type="text"
                     icon={<ReloadOutlined />}
-                    aria-label="刷新文件夹列表"
-                    title="刷新文件夹列表"
+                    aria-label="Refresh folder list"
+                    title="Refresh folder list"
                     onClick={() => void loadSnapshotFolders()}
                   />
                 </Space>
@@ -898,7 +898,7 @@ export default function LivePage() {
                   <Input
                     value={newFolderName}
                     onChange={(e) => setNewFolderName(e.target.value)}
-                    placeholder="输入新建文件夹名称（抓拍时创建）"
+                    placeholder="Enter new folder name (created on snapshot)"
                     allowClear
                     maxLength={128}
                   />
@@ -908,9 +908,9 @@ export default function LivePage() {
                     value={snapshotFormat}
                     onChange={setSnapshotFormat}
                     options={[
-                      { value: 'fits', label: 'FITS（16-bit 原始）' },
-                      { value: 'tiff', label: 'TIFF（16-bit）' },
-                      { value: 'png', label: 'PNG（8-bit 自动对比度）' },
+                      { value: 'fits', label: 'FITS (16-bit raw)' },
+                      { value: 'tiff', label: 'TIFF (16-bit)' },
+                      { value: 'png', label: 'PNG (8-bit auto-contrast)' },
                     ]}
                     style={{ width: 220 }}
                   />
@@ -920,16 +920,16 @@ export default function LivePage() {
                     loading={snapshotBusy}
                     onClick={() => void takeSnapshot()}
                   >
-                    抓拍
+                    Snapshot
                   </Button>
                 </Space>
                 {snapshot && (
                   <Descriptions size="small" column={1}>
-                    <Descriptions.Item label="文件名">{snapshot.file}</Descriptions.Item>
-                    <Descriptions.Item label="文件夹">
-                      {snapshot.folder ? snapshot.folder : '根目录'}
+                    <Descriptions.Item label="File Name">{snapshot.file}</Descriptions.Item>
+                    <Descriptions.Item label="Folder">
+                      {snapshot.folder ? snapshot.folder : 'Root folder'}
                     </Descriptions.Item>
-                    <Descriptions.Item label="下载">
+                    <Descriptions.Item label="Download">
                       <a href={resolveUrl(snapshot.url)} target="_blank" rel="noreferrer">
                         {snapshot.url} <LinkOutlined />
                       </a>
@@ -937,7 +937,7 @@ export default function LivePage() {
                   </Descriptions>
                 )}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  快照保存到 data/snapshots/（或所选子文件夹），URL 由后端返回。
+                  Snapshots are saved to data/snapshots/ (or the selected subfolder); the URL is returned by the backend.
                 </Typography.Text>
               </Space>
             </Card>
@@ -951,16 +951,16 @@ export default function LivePage() {
             size="small"
             title={
               <Space>
-                相机参数
+                Camera Parameters
                 <Typography.Text type="secondary" style={{ fontWeight: 'normal', fontSize: 12 }}>
-                  改动立即写入相机并显示返回 actual
+                  Changes are written to the camera immediately and the returned actual value is shown
                 </Typography.Text>
               </Space>
             }
             loading={propsLoading}
           >
             {properties.length === 0 && !propsLoading ? (
-              <Alert type="warning" showIcon message="未打开设备，无法获取属性" description="请先到「设备连接」页打开设备（GET /api/properties 未打开设备时返回 409）。" />
+              <Alert type="warning" showIcon message="No device open, cannot fetch properties" description='Please open a device on the "Connect" page first (GET /api/properties returns 409 when no device is open).' />
             ) : (
               <>
                 {numericProps.map((p) => (
@@ -981,18 +981,18 @@ export default function LivePage() {
         </Col>
 
         <Col xs={24} lg={8}>
-          <Card size="small" title="拍摄区域（ROI）" loading={propsLoading}>
+          <Card size="small" title="Capture Region (ROI)" loading={propsLoading}>
             {roiProps.length === 0 && !propsLoading ? (
               <Typography.Text type="secondary">
-                当前相机未报告 ROI 属性（mock 至少支持 width/height）。
+                The current camera does not report ROI properties (the mock driver supports at least width/height).
               </Typography.Text>
             ) : (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <div>
-                  <Typography.Text>当前 ROI：{roiWidthText}</Typography.Text>
+                  <Typography.Text>Current ROI: {roiWidthText}</Typography.Text>
                   <br />
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    全画幅最大：{roiMaxText} · 与预览拖动双向同步
+                    Full-frame maximum: {roiMaxText} · Two-way sync with preview drag
                   </Typography.Text>
                 </div>
                 <Row gutter={[12, 12]}>
@@ -1008,7 +1008,7 @@ export default function LivePage() {
                   ))}
                 </Row>
                 <Button block onClick={() => void resetRoi()} loading={roiBusy}>
-                  重置全画幅
+                  Reset to Full Frame
                 </Button>
               </Space>
             )}

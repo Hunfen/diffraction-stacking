@@ -31,11 +31,11 @@ POISSON_EXACT_MAX_LAMBDA = 24.0
 
 
 class CameraError(RuntimeError):
-    """相机操作错误（信息直接面向用户，中文）。
+    """Camera operation error (messages are user-facing and in English).
 
-    ``status`` 为可选的 HTTP 语义建议（400/404/409/503/500）：
-    IC4 路径按官方 ErrorCode 分类给出；Mock 路径不设置，
-    main.raise_cam_err 回落到原有的中文信息匹配，行为不变。
+    ``status`` is an optional HTTP semantic hint (400/404/409/503/500):
+    the IC4 path maps official ErrorCode values; the Mock path does not set it
+    and main.raise_cam_err falls back to English keyword matching.
     """
 
     def __init__(self, message: str, status: int | None = None):
@@ -86,7 +86,7 @@ class BaseCamera:
         for p in self.get_properties():
             if p["name"] == name:
                 return p["value"]
-        raise CameraError(f"未知属性：{name}")
+        raise CameraError(f"Unknown property: {name}")
 
     def set_property(self, name: str, value: Any) -> Any:  # pragma: no cover
         raise NotImplementedError
@@ -123,29 +123,29 @@ class MockCamera(BaseCamera):
         self._hot_full = self._make_hot_pixels()
 
         self._props: dict[str, dict] = {
-            "exposure": _prop("exposure", "曝光", 20000, "int",
+            "exposure": _prop("exposure", "Exposure", 20000, "int",
                               min_=30, max_=30_000_000, step=1, unit="us"),
-            "gain": _prop("gain", "增益", 0.0, "float",
+            "gain": _prop("gain", "Gain", 0.0, "float",
                           min_=0.0, max_=48.0, step=0.1, unit="dB"),
-            "black_level": _prop("black_level", "黑电平", 0, "int",
+            "black_level": _prop("black_level", "Black Level", 0, "int",
                                  min_=0, max_=255, step=1, unit="ADU"),
-            "width": _prop("width", "ROI 宽度", 1024, "int",
+            "width": _prop("width", "ROI Width", 1024, "int",
                            min_=320, max_=FULL_WIDTH, step=8, unit="px"),
-            "height": _prop("height", "ROI 高度", 768, "int",
+            "height": _prop("height", "ROI Height", 768, "int",
                             min_=240, max_=FULL_HEIGHT, step=8, unit="px"),
-            "offset_x": _prop("offset_x", "ROI X 偏移", (FULL_WIDTH - 1024) // 2,
+            "offset_x": _prop("offset_x", "ROI X Offset", (FULL_WIDTH - 1024) // 2,
                               "int", min_=0, max_=FULL_WIDTH - 1024, step=8, unit="px"),
-            "offset_y": _prop("offset_y", "ROI Y 偏移", (FULL_HEIGHT - 768) // 2,
+            "offset_y": _prop("offset_y", "ROI Y Offset", (FULL_HEIGHT - 768) // 2,
                               "int", min_=0, max_=FULL_HEIGHT - 768, step=8, unit="px"),
-            "reverse_x": _prop("reverse_x", "水平镜像", False, "bool"),
-            "reverse_y": _prop("reverse_y", "垂直镜像", False, "bool"),
-            "trigger_mode": _prop("trigger_mode", "触发模式", False, "bool"),
-            "mock_pattern": _prop("mock_pattern", "衍射图案", "leed", "enum",
+            "reverse_x": _prop("reverse_x", "Reverse X", False, "bool"),
+            "reverse_y": _prop("reverse_y", "Reverse Y", False, "bool"),
+            "trigger_mode": _prop("trigger_mode", "Trigger Mode", False, "bool"),
+            "mock_pattern": _prop("mock_pattern", "Diffraction Pattern", "leed", "enum",
                                   options=["leed", "rheed"]),
-            "mock_scene": _prop("mock_scene", "模拟场景", "diffraction", "enum",
+            "mock_scene": _prop("mock_scene", "Mock Scene", "diffraction", "enum",
                                 options=["diffraction", "uniform", "dark"]),
-            "mock_drift": _prop("mock_drift", "模拟慢漂移", False, "bool"),
-            "device_temperature": _prop("device_temperature", "传感器温度", 25.0,
+            "mock_drift": _prop("mock_drift", "Mock Slow Drift", False, "bool"),
+            "device_temperature": _prop("device_temperature", "Sensor Temperature", 25.0,
                                         "float", min_=0.0, max_=100.0, step=0.1,
                                         unit="°C", readonly=True),
         }
@@ -179,7 +179,7 @@ class MockCamera(BaseCamera):
     def get_property(self, name: str) -> Any:
         with self._lock:
             if name not in self._props:
-                raise CameraError(f"未知属性：{name}")
+                raise CameraError(f"Unknown property: {name}")
             if name == "device_temperature":
                 return self._temperature()
             return self._props[name]["value"]
@@ -187,26 +187,26 @@ class MockCamera(BaseCamera):
     def set_property(self, name: str, value: Any) -> Any:
         with self._lock:
             if name not in self._props:
-                raise CameraError(f"未知属性：{name}")
+                raise CameraError(f"Unknown property: {name}")
             p = self._props[name]
             if p["readonly"]:
-                raise CameraError(f"属性 {name} 只读")
+                raise CameraError(f"Property {name} is read-only")
             ptype = p["type"]
             if ptype in ("int", "float"):
                 try:
                     v = float(value)
                 except (TypeError, ValueError):
-                    raise CameraError(f"属性 {name} 需要数值")
+                    raise CameraError(f"Property {name} requires a numeric value")
                 v = min(max(v, float(p["min"])), float(p["max"]))
                 actual = int(round(v)) if ptype == "int" else round(v, 3)
             elif ptype == "bool":
                 actual = bool(value)
             elif ptype == "enum":
                 if value not in p["options"]:
-                    raise CameraError(f"属性 {name} 仅支持：{', '.join(p['options'])}")
+                    raise CameraError(f"Property {name} only supports: {', '.join(p['options'])}")
                 actual = value
             else:
-                raise CameraError(f"不支持的属性类型：{ptype}")
+                raise CameraError(f"Unsupported property type: {ptype}")
 
             p["value"] = actual
             if name in ("width", "height", "offset_x", "offset_y"):
@@ -344,7 +344,7 @@ class MockCamera(BaseCamera):
     def grab_frame(self) -> np.ndarray:
         with self._lock:
             if not self._opened:
-                raise CameraError("设备未打开")
+                raise CameraError("Device is not open")
             w = int(self._props["width"]["value"])
             h = int(self._props["height"]["value"])
             ox = int(self._props["offset_x"]["value"])
@@ -505,9 +505,10 @@ def _load_ic4():
             import imagingcontrol4 as ic4  # type: ignore
         except Exception as exc:  # noqa: BLE001
             _IC4_LIB_ERROR = (
-                "该平台无法加载 imagingcontrol4。请确认采集主机已安装与相机匹配的 "
-                "ic4 驱动（GenTL producer）并执行 pip install imagingcontrol4"
-                "（Windows/Linux 请选择与主机架构匹配的 wheel）。原始错误："
+                "Unable to load imagingcontrol4 on this platform. Install the "
+                "matching ic4 driver (GenTL producer) and run pip install "
+                "imagingcontrol4 (on Windows/Linux choose the wheel matching "
+                "the host architecture). Original error: "
                 f"{exc.__class__.__name__}: {exc}")
             return None, _IC4_LIB_ERROR
         try:
@@ -515,7 +516,7 @@ def _load_ic4():
             _IC4_LIB = ic4
             return ic4, None
         except Exception as exc:  # noqa: BLE001
-            _IC4_LIB_ERROR = f"imagingcontrol4 初始化失败：{exc}"
+            _IC4_LIB_ERROR = f"imagingcontrol4 initialization failed: {exc}"
             return None, _IC4_LIB_ERROR
 
 
@@ -590,17 +591,17 @@ class IC4Camera(BaseCamera):
     # PropId 常量见 api-reference.html → PropId（EXPOSURE_TIME、GAIN…）；
     # 注意：官方常量是 EXPOSURE_TIME，不是 EXPOSURE。
     _SPEC = (
-        ("exposure", "EXPOSURE_TIME", "float", "曝光", "us"),
-        ("gain", "GAIN", "float", "增益", "dB"),
-        ("black_level", "BLACK_LEVEL", "int", "黑电平", "ADU"),
-        ("width", "WIDTH", "int", "ROI 宽度", "px"),
-        ("height", "HEIGHT", "int", "ROI 高度", "px"),
-        ("offset_x", "OFFSET_X", "int", "ROI X 偏移", "px"),
-        ("offset_y", "OFFSET_Y", "int", "ROI Y 偏移", "px"),
-        ("reverse_x", "REVERSE_X", "bool", "水平镜像", ""),
-        ("reverse_y", "REVERSE_Y", "bool", "垂直镜像", ""),
-        ("trigger_mode", "TRIGGER_MODE", "bool", "触发模式", ""),
-        ("device_temperature", "DEVICE_TEMPERATURE", "float", "传感器温度", "°C"),
+        ("exposure", "EXPOSURE_TIME", "float", "Exposure", "us"),
+        ("gain", "GAIN", "float", "Gain", "dB"),
+        ("black_level", "BLACK_LEVEL", "int", "Black Level", "ADU"),
+        ("width", "WIDTH", "int", "ROI Width", "px"),
+        ("height", "HEIGHT", "int", "ROI Height", "px"),
+        ("offset_x", "OFFSET_X", "int", "ROI X Offset", "px"),
+        ("offset_y", "OFFSET_Y", "int", "ROI Y Offset", "px"),
+        ("reverse_x", "REVERSE_X", "bool", "Reverse X", ""),
+        ("reverse_y", "REVERSE_Y", "bool", "Reverse Y", ""),
+        ("trigger_mode", "TRIGGER_MODE", "bool", "Trigger Mode", ""),
+        ("device_temperature", "DEVICE_TEMPERATURE", "float", "Sensor Temperature", "°C"),
     )
     _SPEC_BY_NAME = {s[0]: s for s in _SPEC}
     _READONLY_NAMES = {"device_temperature"}
@@ -629,7 +630,7 @@ class IC4Camera(BaseCamera):
                 self._reset_fields()
             lib, err = _load_ic4()
             if lib is None:
-                raise CameraError(err or "该平台无法加载 imagingcontrol4",
+                raise CameraError(err or "Unable to load imagingcontrol4",
                                   status=503)
             self._close_requested.clear()
             grabber = None
@@ -641,7 +642,7 @@ class IC4Camera(BaseCamera):
                         target = info
                         break
                 if target is None:
-                    raise CameraError(f"未找到序列号为 {self.serial} 的 ic4 设备",
+                    raise CameraError(f"No ic4 device found with serial {self.serial}",
                                       status=404)
                 # device_open 支持 DeviceInfo 或字符串（api-reference → Grabber.
                 # device_open(dev: DeviceInfo | str)）。用枚举到的 DeviceInfo 打开，
@@ -649,7 +650,7 @@ class IC4Camera(BaseCamera):
                 grabber = lib.Grabber()
                 grabber.device_open(target)
                 if not grabber.is_device_open:
-                    raise CameraError(f"ic4 设备 {self.name} 打开后状态异常",
+                    raise CameraError(f"ic4 device {self.name} is in an unexpected state after opening",
                                       status=503)
                 sink = _make_queue_sink(lib)
                 # 全部成功后才发布到实例状态，失败路径不会留下半开 Grabber
@@ -665,7 +666,7 @@ class IC4Camera(BaseCamera):
             except Exception as exc:  # noqa: BLE001
                 self._discard_grabber(grabber)
                 self._reset_fields()
-                raise CameraError(f"打开 ic4 设备失败（{self.name}）：{exc}",
+                raise CameraError(f"Failed to open ic4 device ({self.name}): {exc}",
                                   status=_ic4_exc_status(exc) or 503)
 
     def _reset_fields(self) -> None:
@@ -696,7 +697,7 @@ class IC4Camera(BaseCamera):
             except Exception:  # noqa: BLE001
                 return True  # 已成功 set，回读失败仍按 Mono16 处理
         except Exception:  # noqa: BLE001
-            _log.warning("ic4 PIXEL_FORMAT 配置失败，使用 sink 自动转换",
+            _log.warning("ic4 PIXEL_FORMAT configuration failed, using sink auto-conversion",
                          exc_info=True)
             return False
 
@@ -733,20 +734,20 @@ class IC4Camera(BaseCamera):
                 if grabber.is_streaming:
                     grabber.stream_stop()
             except Exception:  # noqa: BLE001
-                _log.warning("ic4 stream_stop 失败（设备可能已断开）",
+                _log.warning("ic4 stream_stop failed (device may be disconnected)",
                              exc_info=True)
             try:
                 if grabber.is_device_open:
                     grabber.device_close()
             except Exception:  # noqa: BLE001
-                _log.warning("ic4 device_close 失败（设备可能已断开）",
+                _log.warning("ic4 device_close failed (device may be disconnected)",
                              exc_info=True)
 
     def _ensure_open(self):
         if not self._opened or self._grabber is None:
-            raise CameraError("设备未打开", status=409)
+            raise CameraError("Device is not open", status=409)
         if not self._grabber.is_device_valid:
-            raise CameraError("相机连接已断开，请检查连接后重新打开设备",
+            raise CameraError("Camera connection lost. Reconnect and reopen the device.",
                               status=503)
         return self._grabber
 
@@ -778,7 +779,7 @@ class IC4Camera(BaseCamera):
             except CameraError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise CameraError(f"ic4 抓帧失败：{exc}",
+                raise CameraError(f"ic4 frame grab failed: {exc}",
                                   status=_ic4_exc_status(exc) or 503)
 
     def _pop_with_timeout(self, timeout_ms: int):
@@ -789,18 +790,19 @@ class IC4Camera(BaseCamera):
         deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
             if self._close_requested.is_set():
-                raise CameraError("设备已关闭", status=409)
+                raise CameraError("Device is closed", status=409)
             try:
                 buf = self._sink.try_pop_output_buffer()
             except Exception as exc:  # noqa: BLE001
-                raise CameraError(f"读取相机图像失败：{exc}",
+                raise CameraError(f"Failed to read camera image: {exc}",
                                   status=_ic4_exc_status(exc) or 503)
             if buf is not None:
                 return buf
             if time.monotonic() >= deadline:
                 raise CameraError(
-                    f"等待相机图像超时（{timeout_ms}ms），"
-                    "请检查相机连接或触发模式设置", status=503)
+                    f"Timed out waiting for camera image ({timeout_ms}ms). "
+                    "Check the camera connection or trigger mode settings.",
+                    status=503)
             time.sleep(0.005)
 
     def _normalize_12bit(self, img: np.ndarray) -> np.ndarray:
@@ -874,7 +876,7 @@ class IC4Camera(BaseCamera):
         pid = self._pid(name)
         prop = pmap.find(pid)
         if not prop.is_available:
-            raise CameraError(f"属性 {name} 当前不可用", status=409)
+            raise CameraError(f"Property {name} is currently unavailable", status=409)
         readonly = bool(prop.is_readonly)
         if ptype == "bool":
             try:
@@ -906,13 +908,13 @@ class IC4Camera(BaseCamera):
     def get_property(self, name: str) -> Any:
         with self._lock:
             if name not in self._SPEC_BY_NAME:
-                raise CameraError(f"未知属性：{name}", status=400)
+                raise CameraError(f"Unknown property: {name}", status=400)
             try:
                 return self._read_prop(self._pmap(), name)["value"]
             except CameraError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise CameraError(f"读取属性 {name} 失败：{exc}",
+                raise CameraError(f"Failed to read property {name}: {exc}",
                                   status=_ic4_exc_status(exc) or 400)
 
     def _coerce_value(self, prop, name: str, value: Any, ptype: str):
@@ -924,14 +926,14 @@ class IC4Camera(BaseCamera):
                     return True
                 if v in ("false", "off", "0", "no"):
                     return False
-                raise CameraError(f"属性 {name} 需要布尔值", status=400)
+                raise CameraError(f"Property {name} requires a boolean value", status=400)
             if not isinstance(value, (bool, int, float)):
-                raise CameraError(f"属性 {name} 需要布尔值", status=400)
+                raise CameraError(f"Property {name} requires a boolean value", status=400)
             return bool(value)
         try:
             v = float(value)
         except (TypeError, ValueError):
-            raise CameraError(f"属性 {name} 需要数值", status=400)
+            raise CameraError(f"Property {name} requires a numeric value", status=400)
         val, lo, hi, _ = self._range_details(prop, lib)
         v = min(max(v, lo), hi)              # 契约：越界值自动钳制
         try:
@@ -958,9 +960,9 @@ class IC4Camera(BaseCamera):
         with self._lock:
             grabber = self._ensure_open()
             if name not in self._SPEC_BY_NAME:
-                raise CameraError(f"未知属性：{name}", status=400)
+                raise CameraError(f"Unknown property: {name}", status=400)
             if name in self._READONLY_NAMES:
-                raise CameraError(f"属性 {name} 只读", status=400)
+                raise CameraError(f"Property {name} is read-only", status=400)
             _, _, ptype, _label, _unit = self._SPEC_BY_NAME[name]
             lib = self._lib
             pid = self._pid(name)
@@ -968,26 +970,26 @@ class IC4Camera(BaseCamera):
             try:
                 prop = pmap.find(pid)
                 if not prop.is_available:
-                    raise CameraError(f"属性 {name} 当前不可用", status=409)
+                    raise CameraError(f"Property {name} is currently unavailable", status=409)
                 if prop.is_readonly:
-                    raise CameraError(f"属性 {name} 只读", status=400)
+                    raise CameraError(f"Property {name} is read-only", status=400)
                 if prop.is_locked:
                     raise CameraError(
-                        f"属性 {name} 当前被锁定，请先停止采集或关闭自动控制",
+                        f"Property {name} is locked. Stop acquisition or disable auto control first.",
                         status=409)
                 actual_arg = self._coerce_value(prop, name, value, ptype)
                 pmap.set_value(pid, actual_arg)
             except CameraError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise CameraError(f"设置属性 {name} 失败：{exc}",
+                raise CameraError(f"Failed to set property {name}: {exc}",
                                   status=_ic4_exc_status(exc) or 400)
             try:
                 return self._read_prop(pmap, name)["value"]
             except CameraError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise CameraError(f"设置属性 {name} 后回读失败：{exc}",
+                raise CameraError(f"Failed to read back property {name} after setting it: {exc}",
                                   status=_ic4_exc_status(exc) or 500)
 
 
@@ -1032,9 +1034,9 @@ class CameraService:
                     found = d
                     break
             if found is None:
-                raise CameraError(f"设备不存在：{cam_id}")
+                raise CameraError(f"Device does not exist: {cam_id}")
             return IC4Camera(found["id"], found["name"], found["serial"])
-        raise CameraError(f"设备不存在：{cam_id}")
+        raise CameraError(f"Device does not exist: {cam_id}")
 
     def open(self, cam_id: str) -> BaseCamera:
         with self._lock:
@@ -1062,7 +1064,7 @@ class CameraService:
     def ensure_device(self) -> BaseCamera:
         with self._lock:
             if self._device is None or not self._device.opened:
-                raise CameraError("设备未打开")
+                raise CameraError("Device is not open")
             return self._device
 
     def grab_frame(self) -> np.ndarray:

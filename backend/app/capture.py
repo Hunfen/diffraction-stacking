@@ -28,10 +28,10 @@ PHASE_TYPES = ("bias", "dark", "flat", "light")
 ACTIVE_STATUSES = {"running", "waiting_user", "capturing"}
 
 PROMPTS = {
-    "bias": "请盖上镜头盖（传感器完全无光），确认后开始拍摄 Bias（最短曝光）",
-    "dark": "请保持镜头盖盖上，Dark 曝光与 Light 一致，确认后开始拍摄 Dark",
-    "flat": "请提供均匀照明（散焦束流或面光源），画面中不要出现衍射斑点，确认后开始拍摄 Flat",
-    "light": "请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light",
+    "bias": "Cover the lens (sensor in complete darkness), then confirm to start capturing Bias (shortest exposure)",
+    "dark": "Keep the lens covered. Dark uses the same exposure as Light. Confirm to start capturing Dark",
+    "flat": "Provide uniform illumination (defocused beam or flat light source) with no diffraction spots visible, then confirm to start capturing Flat",
+    "light": "Restore normal diffraction conditions. Check the exposure/gain parameters against the live preview and histogram, then confirm to start the continuous Light capture",
 }
 
 MAX_CONSECUTIVE_FAILURES = 5
@@ -99,15 +99,15 @@ class CaptureService:
     def plan(self, session_name: str, phases: list[dict]) -> dict:
         with self._lock:
             if self._state["status"] in ACTIVE_STATUSES:
-                raise RuntimeError("拍摄进行中，不能重新创建计划")
+                raise RuntimeError("Capture in progress, cannot create a new plan")
             normalized = []
             for ph in phases:
                 ptype = ph["type"]
                 count = int(ph["count"])
                 if ptype not in PHASE_TYPES:
-                    raise RuntimeError(f"未知相位类型：{ptype}")
+                    raise RuntimeError(f"Unknown phase type: {ptype}")
                 if count < 1 or count > 10000:
-                    raise RuntimeError(f"{ptype} 的 count 必须在 1–10000 之间")
+                    raise RuntimeError(f"count for {ptype} must be between 1 and 10000")
                 exposure_us = ph.get("exposure_us")
                 if exposure_us is None and self.camera.is_open():
                     exposure_us = self.camera.get_property("exposure")
@@ -131,11 +131,11 @@ class CaptureService:
     def start(self) -> dict:
         with self._lock:
             if self._plan is None:
-                raise RuntimeError("请先创建拍摄计划（POST /api/capture/plan）")
+                raise RuntimeError("Create a capture plan first (POST /api/capture/plan)")
             if self._state["status"] in ACTIVE_STATUSES:
-                raise RuntimeError("拍摄已在运行")
+                raise RuntimeError("Capture is already running")
             if not self.camera.is_open():
-                raise RuntimeError("设备未打开，请先打开相机")
+                raise RuntimeError("Device is not open. Open the camera first.")
             self._abort_event.clear()
             self._resume_event.clear()
             self._session_id = None
@@ -149,9 +149,9 @@ class CaptureService:
                 "frames_done": 0,
                 "total_frames": total,
                 "prompt": None,
-                "message": "拍摄启动",
+                "message": "Capture started",
                 "needs_user": False,
-                "log": [{"t": now_iso(), "msg": "拍摄启动"}],
+                "log": [{"t": now_iso(), "msg": "Capture started"}],
             })
             self._push()
             self._thread = threading.Thread(
@@ -163,13 +163,13 @@ class CaptureService:
     def resume(self) -> dict:
         with self._lock:
             if self._state["status"] != "waiting_user":
-                raise RuntimeError("当前不在 waiting_user 状态，无需 resume")
+                raise RuntimeError("Not in waiting_user state, no resume needed")
             if not self._state.get("needs_user"):
-                raise RuntimeError("当前相位无需人工确认，会自动继续")
+                raise RuntimeError("Current phase needs no manual confirmation and will continue automatically")
             self._resume_event.set()
             self._state["status"] = "capturing"
             self._state["prompt"] = None
-            self._state["message"] = "已人工确认参数，开始拍摄 LIGHT"
+            self._state["message"] = "Parameters confirmed, starting LIGHT capture"
             self._state["needs_user"] = False
             self._push()
             return {"status": "capturing"}
@@ -177,10 +177,10 @@ class CaptureService:
     def abort(self) -> dict:
         with self._lock:
             if self._state["status"] not in ACTIVE_STATUSES:
-                raise RuntimeError("当前无进行中的拍摄")
+                raise RuntimeError("No capture in progress")
             self._abort_event.set()
             self._resume_event.set()   # 若正在等待人工确认，立即结束
-            self._state["message"] = "收到中止请求"
+            self._state["message"] = "Abort requested"
             return {"status": "aborted"}
 
     def shutdown(self) -> None:
@@ -204,7 +204,7 @@ class CaptureService:
             session_dir.mkdir(parents=True, exist_ok=False)
             for g in PHASE_TYPES:
                 (session_dir / g / "thumbs").mkdir(parents=True, exist_ok=True)
-            self._set(session_name=plan["session_name"], message="创建会话目录")
+            self._set(session_name=plan["session_name"], message="Creating session directory")
             self._write_meta(session_dir, session_id, plan, "running")
         except FileExistsError:
             session_id = f"{plan['session_name']}_{uuid.uuid4().hex[:4]}"
@@ -222,14 +222,14 @@ class CaptureService:
         try:
             for idx, phase in enumerate(plan["phases"], start=1):
                 if self._abort_event.is_set():
-                    self._finish("aborted", "拍摄已中止")
+                    self._finish("aborted", "Capture aborted")
                     return
                 ptype = phase["type"]
                 self._enter_phase(idx, len(plan["phases"]), phase)
                 if ptype == "light":
                     # LIGHT 前强制人工确认：needs_user=true，等待 resume
                     if not self._wait_resume():
-                        self._finish("aborted", "拍摄已中止")
+                        self._finish("aborted", "Capture aborted")
                         return
                 else:
                     # 非 light 相位：waiting_user 展示 0.2s（prompt 转入 message）
@@ -237,7 +237,7 @@ class CaptureService:
                     deadline = time.monotonic() + 0.2
                     while time.monotonic() < deadline:
                         if self._abort_event.is_set():
-                            self._finish("aborted", "拍摄已中止")
+                            self._finish("aborted", "Capture aborted")
                             return
                         time.sleep(0.02)
                     self._set(status="capturing", message=PROMPTS[ptype],
@@ -246,13 +246,13 @@ class CaptureService:
 
                 if not self._capture_phase(phase, ptype):
                     return
-                self._log(f"{ptype.upper()} 完成 {phase['count']}/{phase['count']}")
+                self._log(f"{ptype.upper()} done {phase['count']}/{phase['count']}")
                 self._write_meta(session_dir, session_id, plan,
                                  self.get_state()["status"])
-            self._finish("finished", "拍摄完成")
+            self._finish("finished", "Capture finished")
         except Exception as exc:  # noqa: BLE001
-            self._log(f"拍摄异常：{exc}")
-            self._finish("error", f"拍摄异常：{exc}")
+            self._log(f"Capture error: {exc}")
+            self._finish("error", f"Capture error: {exc}")
 
     def _enter_phase(self, index: int, total: int, phase: dict) -> None:
         ptype = phase["type"]
@@ -261,7 +261,7 @@ class CaptureService:
             try:
                 self.camera.set_property("exposure", float(phase["exposure_us"]))
             except Exception as exc:  # noqa: BLE001
-                self._log(f"设置曝光失败（继续使用当前值）：{exc}")
+                self._log(f"Failed to set exposure (continuing with current value): {exc}")
         # Mock 相机场景同步：bias/dark=暗场、flat=均匀照明、light=衍射图案。
         # 真机无该属性时静默跳过（物理条件由操作者准备）。
         scene = {"bias": "dark", "dark": "dark", "flat": "uniform",
@@ -278,7 +278,7 @@ class CaptureService:
             prompt=prompt,
             needs_user=(ptype == "light"),
         )
-        self._log(f"准备拍摄 {ptype.upper()}：{prompt}")
+        self._log(f"Preparing {ptype.upper()}: {prompt}")
         self._push()
 
     def _wait_resume(self) -> bool:
@@ -299,7 +299,7 @@ class CaptureService:
         self._set(status="capturing", needs_user=False)
         for n in range(1, int(phase["count"]) + 1):
             if self._abort_event.is_set():
-                self._finish("aborted", "拍摄已中止")
+                self._finish("aborted", "Capture aborted")
                 return False
             try:
                 frame = self.camera.grab_frame()
@@ -314,7 +314,7 @@ class CaptureService:
                     self._save_fits(group_dir / f"{name}.fits", frame, stats,
                                     ptype, exposure, gain, black, temp, cam, n)
                 except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(f"FITS 写入失败：{exc}") from exc
+                    raise RuntimeError(f"Failed to write FITS: {exc}") from exc
                 thumb = auto_contrast_8bit(frame)
                 Image.fromarray(thumb, mode="L").save(
                     thumbs_dir / f"{name}.png", optimize=False)
@@ -322,24 +322,24 @@ class CaptureService:
                 successful_frames += 1
                 with self._lock:
                     self._state["frames_done"] += 1
-                self._log(f"{ptype.upper()} {n}/{phase['count']} 完成 "
+                self._log(f"{ptype.upper()} {n}/{phase['count']} done "
                           f"(mean={stats['mean']:.1f}, saturated_pct="
                           f"{stats['saturated_pct']:.2f})")
                 self._push()
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
-                self._log(f"{ptype.upper()} 第 {n} 帧失败：{exc}")
+                self._log(f"{ptype.upper()} frame {n} failed: {exc}")
                 self._push()
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    self._log("连续 5 帧失败，自动中止")
-                    self._finish("error", "连续 5 帧失败，自动中止")
+                    self._log("5 consecutive frames failed, auto-aborting")
+                    self._finish("error", "5 consecutive frames failed, auto-aborting")
                     return False
                 time.sleep(0.05)
         if successful_frames == 0 and consecutive_failures > 0:
             # 防止“帧全丢但状态 finished”的假完成：
             # 该相位一帧都没落盘时按 error 中止，而非继续走 finished。
-            self._log(f"{ptype.upper()} 所有帧均失败，自动中止")
-            self._finish("error", f"{ptype.upper()} 所有帧均失败，自动中止")
+            self._log(f"{ptype.upper()} all frames failed, auto-aborting")
+            self._finish("error", f"{ptype.upper()} all frames failed, auto-aborting")
             return False
         return True
 
@@ -433,7 +433,7 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
         Image.fromarray(auto_contrast_8bit(frame), mode="L").save(
             snap_dir / name)
     else:
-        raise RuntimeError(f"不支持的快照格式：{fmt}（仅支持 fits|tiff|png）")
+        raise RuntimeError(f"Unsupported snapshot format: {fmt} (only fits|tiff|png)")
     if folder:
         url = f"/api/files/snapshots/{folder}/{name}"
     else:
