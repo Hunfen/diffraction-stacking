@@ -1,4 +1,4 @@
-# Diffraction Stacking — 前后端 API 契约 v1.2
+# Diffraction Stacking — 前后端 API 契约 v1.3
 
 > 本文件是后端（FastAPI）与前端（React）之间的**唯一契约**。
 > 前后端必须严格按本文件实现；发现契约歧义时先报告船长，不得各自发挥。
@@ -24,7 +24,9 @@
 - 数据目录（v1.2）：所有运行时文件统一落在 `data_root` 下（`snapshots/`、`captures/`）。
   `data_root` 由 `GET/PUT /api/settings` 暴露，运行中修改立即生效；启动优先级：
   `DIFF_DATA_ROOT` 环境变量 > `backend/.data_root.json` > `<repo>/data`
-- 文件下载接口 `GET /api/files/{session_id}/{rel_path}`：`rel_path` 允许 `meta.json`、`<group>/<file>`、`<group>/thumbs/<file>`、`results/<file>`；必须做路径穿越防护，非法路径返回 400
+- 文件下载接口 `GET /api/files/{session_id}/{rel_path}`：`rel_path` 允许 `meta.json`、`<group>/<file>`、`<group>/thumbs/<file>`、`results/<file>`；
+  `session_id=snapshots` 时允许根目录文件 `<file>` 与单级子目录文件 `<folder>/<file>`（v1.3）。
+  必须做路径穿越防护（不允许绝对路径、`..` 段、路径分隔符滥用与越出目标目录），非法路径返回 400
   - `<group>` ∈ `bias|dark|flat|light`（含 `thumbs/` 子目录）；`masters/` 与 `calibrated/` 目录下的文件同样可直接访问（如 `masters/MASTER_DARK.fits`）
   - 所有 `/api/files/**` 响应头固定带 `Cache-Control: no-store`（v1.2，保证拉伸预览等文件永远取最新版本）
 
@@ -158,16 +160,38 @@
 - `histogram` 为 **8-bit 预览图**的 256 bin 直方图（前后端显示口径一致）
 - JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=ROI×scale
 
-**POST /api/snapshot** — body `{ "format": "fits" }`（`fits`|`tiff`|`png`）
+**POST /api/snapshot** — body `{ "format": "fits", "folder": "子目录名" }`
+
+- `format` ∈ `fits`|`tiff`|`png`（缺省 `fits`）
+- `folder`（v1.3）：可选，相对子目录名；缺省/空 → 存 `<data_root>/snapshots/`，
+  非空 → 存 `<data_root>/snapshots/<folder>/`，目录不存在时自动创建（创建失败返回 **400** 中文错误）
 
 ```json
 { "ok": true, "data": { "file": "SNP_20260822T10-00-00.fits",
-  "url": "/api/files/snapshots/SNP_20260822T10-00-00.fits" }, "error": null }
+  "url": "/api/files/snapshots/测试文件夹/SNP_20260822T10-00-00.fits",
+  "folder": "测试文件夹" }, "error": null }
 ```
 
-- 快照存 `<data_root>/snapshots/`，16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
+- folder 缺省/空时返回 `folder:""`、`url` 为 `/api/files/snapshots/<file>`
+- **folder 路径防护**（v1.3）：仅允许单段相对子目录名。以下情况返回 **400**（中文错误）：
+  绝对路径（如 `/abs`）、`..`/`.` 段、路径分隔符 `/` `\`（如 `a/b`、`../evil`）、
+  Windows 非法字符 `< > : " | ? *`（与 `sanitize` 口径一致，本接口选择直接拒绝）
+- 快照 16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
 - 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`）
 - 未打开设备返回 409
+
+**GET /api/snapshot/folders**（v1.3）— 列出快照文件夹
+
+```json
+{ "ok": true, "data": { "folders": [
+  { "name": "", "files": 3 },
+  { "name": "测试文件夹", "files": 5 }
+] }, "error": null }
+```
+
+- 列出 `<data_root>/snapshots/` 的**直接子目录**（不含根目录文件，按名称排序）
+- 根目录本身以 `name:""` 表达，`files` 为根目录下直接文件数；
+  每个子目录的 `files` 为该子目录内直接文件数
 
 ### 2.5 序列拍摄
 
@@ -293,7 +317,11 @@
 - v1.2：`name` 为 effective session name（与 `id` 一致，非原始输入）
 
 **GET /api/files/{session_id}/{rel_path}** — 文件下载/访问；`snapshots` 目录以 `session_id=snapshots` 表达。
-响应头固定带 `Cache-Control: no-store`。
+
+- v1.3：`session_id=snapshots` 时支持根目录文件 `/api/files/snapshots/<file>` 与
+  单级子目录文件 `/api/files/snapshots/<folder>/<file>`（folder 与 POST /api/snapshot 同口径校验，
+  路径穿越/越出 `snapshots/` 目录返回 400）
+- 响应头固定带 `Cache-Control: no-store`。
 
 ### 2.7 数据处理
 
@@ -357,7 +385,8 @@
 
 ```
 <data_root>/
-  snapshots/SNP_*.{fits,tiff,png}
+  snapshots/SNP_*.{fits,tiff,png}          # folder 缺省/空（根目录）
+  snapshots/<folder>/SNP_*.{fits,tiff,png} # v1.3：指定 folder 时
   captures/<effective_session_name>/
     meta.json            # {id, name, created, phases[], camera{...}}；name 为 effective session name
     bias/  BIAS_0001.fits ...  + thumbs/BIAS_0001.png

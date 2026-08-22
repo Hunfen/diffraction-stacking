@@ -1,4 +1,4 @@
-/** API 契约类型定义 — 与 docs/api.md v1.0 保持一致 */
+/** API 契约类型定义 — 与 docs/api.md v1.3 保持一致 */
 
 export type PhaseType = 'bias' | 'dark' | 'flat' | 'light';
 
@@ -67,9 +67,22 @@ export interface LiveState {
   quality?: number;
 }
 
+export interface SnapshotFolder {
+  /** 子目录名；根目录用空字符串表示 */
+  name: string;
+  /** 该文件夹内的文件数 */
+  files: number;
+}
+
+export interface SnapshotFoldersData {
+  folders: SnapshotFolder[];
+}
+
+/** v1.3：folder 为实际保存位置（根目录时为空字符串） */
 export interface SnapshotResult {
   file: string;
   url: string;
+  folder: string;
 }
 
 export interface LiveStats {

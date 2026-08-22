@@ -387,6 +387,71 @@ def step_live_snapshot():
         os.chmod(snap_dir, orig_mode)
 
 
+def step_snapshot_folders():
+    """v1.3：快照子文件夹（folder 校验、目录创建、folders 列表、下载）。"""
+    snap_root = REPO / "data" / "snapshots"
+
+    status, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
+    data = snap.get("data") if snap.get("ok") else {}
+    check(status == 200 and snap.get("ok"), "folder 缺省：POST /api/snapshot 成功")
+    check(data.get("folder") == ""
+          and data.get("url") == f"/api/files/snapshots/{data.get('file')}",
+          "folder 缺省 → 存根目录（folder=''，url 不含子目录段）")
+    if data.get("file"):
+        check((snap_root / data["file"]).is_file(),
+              "folder 缺省快照落在 data/snapshots/ 根目录")
+
+    status, snap_blank = http_req("POST", "/api/snapshot",
+                                  {"format": "png", "folder": "   "})
+    blank = snap_blank.get("data") if snap_blank.get("ok") else {}
+    check(status == 200 and snap_blank.get("ok") and blank.get("folder") == "",
+          "folder 为空白 → 存根目录")
+
+    folder_name = "测试文件夹"
+    status, snap_sub = http_req("POST", "/api/snapshot",
+                                {"format": "fits", "folder": folder_name})
+    sub = snap_sub.get("data") if snap_sub.get("ok") else {}
+    check(status == 200 and snap_sub.get("ok"), "folder='测试文件夹'：POST /api/snapshot 成功")
+    check(sub.get("folder") == folder_name, "返回 folder 字段回显子目录名")
+    check(sub.get("url") == f"/api/files/snapshots/{folder_name}/{sub.get('file')}",
+          "url 形如 /api/files/snapshots/<folder>/<file>")
+    check(bool(sub.get("file"))
+          and (snap_root / folder_name / sub["file"]).is_file(),
+          "快照文件自动创建并落入子目录")
+
+    if sub.get("url"):
+        status, body, headers = raw_response(quote(sub["url"], safe="/"))
+        check(status == 200 and body[:6] == b"SIMPLE", "子目录快照 url 可下载（FITS）")
+        check(headers.get("cache-control") == "no-store",
+              "子目录快照下载保持 Cache-Control: no-store")
+
+    _, fp = http_req("GET", "/api/snapshot/folders")
+    folders = ((fp.get("data") or {}).get("folders") or []) if fp.get("ok") else []
+    check(fp.get("ok") and isinstance((fp.get("data") or {}).get("folders"), list),
+          "GET /api/snapshot/folders 返回 ok + folders 数组")
+    root_entry = next((f for f in folders if f.get("name") == ""), None)
+    check(root_entry is not None and root_entry.get("files", 0) >= 1,
+          "folders 含根目录条目 name='' 且 files≥1")
+    names = [f.get("name") for f in folders if f.get("name") != ""]
+    check(names == sorted(names), "子目录按名称排序")
+    target = next((f for f in folders if f.get("name") == folder_name), None)
+    check(target is not None and target.get("files", 0) >= 1,
+          "测试文件夹出现在 folders 且 files≥1")
+
+    for bad in ("../evil", "/abs", "a/b", "a\\b", 'bad:name'):
+        status, r = http_req("POST", "/api/snapshot",
+                             {"format": "fits", "folder": bad}, expect=400)
+        err = (r or {}).get("error", "")
+        check(status == 400 and not r.get("ok")
+              and bool(re.search(r"[\u4e00-\u9fff]", err)),
+              f"非法 folder {bad!r} → 400 中文错误")
+
+    if sub.get("file"):
+        status, _ = raw_request(quote(
+            f"/api/files/snapshots/{folder_name}/../{sub['file']}", safe="/"))
+        check(status == 400, "snapshots 子目录路径穿越（<folder>/../<file>）→ 400")
+
+
 def step_capture():
     global SESSION_ID, EFFECTIVE_SESSION_NAME
     phases = [
@@ -681,6 +746,7 @@ def main():
         step_settings()
         step_chinese_session()
         step_live_snapshot()
+        step_snapshot_folders()
         step_capture()
         step_session_files()
         step_processing()

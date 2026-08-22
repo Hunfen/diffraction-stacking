@@ -399,9 +399,13 @@ class CaptureService:
 
 
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
-                  props: dict | None = None) -> dict:
-    """单帧快照 → <data_root>/snapshots/。FITS 头补齐契约关键字。"""
-    snap_dir = get_snapshots_dir()
+                  props: dict | None = None, folder: str = "") -> dict:
+    """单帧快照 → <data_root>/snapshots/（v1.3：folder 非空存子目录）。
+
+    FITS 头补齐契约关键字；folder 必须已通过路径校验（仅单段相对目录名）。
+    """
+    base = get_snapshots_dir()
+    snap_dir = base / folder if folder else base
     snap_dir.mkdir(parents=True, exist_ok=True)
     ts = now_stamp()
     cam = cam or {}
@@ -430,4 +434,8 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
             snap_dir / name)
     else:
         raise RuntimeError(f"不支持的快照格式：{fmt}（仅支持 fits|tiff|png）")
-    return {"file": name, "url": f"/api/files/snapshots/{name}"}
+    if folder:
+        url = f"/api/files/snapshots/{folder}/{name}"
+    else:
+        url = f"/api/files/snapshots/{name}"
+    return {"file": name, "url": url, "folder": folder}

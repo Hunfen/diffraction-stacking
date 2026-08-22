@@ -305,6 +305,7 @@ class LiveStartBody(BaseModel):
 
 class SnapshotBody(BaseModel):
     format: str = "fits"
+    folder: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -467,11 +468,33 @@ async def ws_live(websocket: WebSocket):
         live_manager.disconnect(websocket)
 
 
+# v1.3：snapshot folder 只允许单段相对子目录名。
+_ILLEGAL_SNAPSHOT_FOLDER_CHARS = frozenset('<>:"|?*')
+
+
+def _snapshot_folder_name(folder: str | None) -> str:
+    """校验并规范化快照子目录名；空值返回 ""（存根目录）。"""
+    raw = (folder or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("/") or raw.startswith("\\"):
+        raise HTTPException(400, "folder 必须是相对子目录名（不允许绝对路径）")
+    if "/" in raw or "\\" in raw:
+        raise HTTPException(400, "folder 不允许包含路径分隔符")
+    if raw == ".." or raw == ".":
+        raise HTTPException(400, "folder 不允许包含 . 或 .. 段")
+    bad = sorted(ch for ch in set(raw) if ch in _ILLEGAL_SNAPSHOT_FOLDER_CHARS)
+    if bad:
+        raise HTTPException(400, f"folder 包含非法字符：{' '.join(bad)}")
+    return raw
+
+
 @app.post("/api/snapshot")
 def snapshot(body: SnapshotBody):
     fmt = body.format
     if fmt not in ("fits", "tiff", "png"):
         raise HTTPException(400, "format 仅支持 fits|tiff|png")
+    folder = _snapshot_folder_name(body.folder)
     try:
         frame = camera_service.grab_frame()
         cam = camera_service.device
@@ -486,11 +509,33 @@ def snapshot(body: SnapshotBody):
     except Exception as exc:  # noqa: BLE001
         raise_cam_err(exc)
     try:
-        return ok(save_snapshot(frame, fmt, cam_info, props))
+        if folder:
+            try:
+                (get_snapshots_dir() / folder).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(400, f"无法创建快照文件夹：{exc}")
+        return ok(save_snapshot(frame, fmt, cam_info, props, folder))
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("uvicorn.error").error(
             "snapshot save failed: %s", exc, exc_info=True)
         raise HTTPException(500, "服务器内部错误")
+
+
+@app.get("/api/snapshot/folders")
+def snapshot_folders():
+    """v1.3：列出 snapshots 直接子目录；根目录以 name="" 表达。"""
+    base = get_snapshots_dir()
+    entries = [p for p in base.iterdir() if p.is_dir()] if base.is_dir() else []
+    folders = [{"name": "", "files": sum(
+        1 for p in base.iterdir() if p.is_file()) if base.is_dir() else 0}]
+    for entry in sorted(entries, key=lambda p: p.name):
+        folders.append({
+            "name": entry.name,
+            "files": sum(1 for p in entry.iterdir() if p.is_file()),
+        })
+    return ok({"folders": folders})
 
 
 # =========================================================================
@@ -559,15 +604,19 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
     if not session_id or ".." in session_id or "/" in session_id \
             or "\\" in session_id:
         raise HTTPException(400, "非法路径：session_id 不合法")
-    if not rel_path or rel_path.startswith("/") or ".." in rel_path \
-            or "\\" in rel_path:
+    if not rel_path or rel_path.startswith("/") or "\\" in rel_path \
+            or any(part == ".." for part in rel_path.split("/")):
         raise HTTPException(400, "非法路径")
     if session_id == "snapshots":
-        if "/" in rel_path:
-            raise HTTPException(400, "非法路径")
+        # v1.3：允许根目录文件与 <folder>/<file> 单级子目录文件。
         base = get_snapshots_dir()
+        parts = rel_path.split("/")
+        if len(parts) > 2 or any(not p for p in parts):
+            raise HTTPException(400, "非法路径")
         path = base / rel_path
-        if path.resolve().parent != base.resolve():
+        resolved = path.resolve()
+        if resolved.parent != base.resolve() \
+                and base.resolve() not in resolved.parents:
             raise HTTPException(400, "非法路径")
         return path
     captures_dir = get_captures_dir()
