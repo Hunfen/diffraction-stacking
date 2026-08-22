@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -14,6 +15,8 @@ from typing import Any
 import numpy as np
 
 from .util import MAX_ADU
+
+_log = logging.getLogger(__name__)
 
 MOCK_ID = "mock-1"
 MOCK_NAME = "Mock LEED/RHEED Camera"
@@ -28,7 +31,16 @@ POISSON_EXACT_MAX_LAMBDA = 24.0
 
 
 class CameraError(RuntimeError):
-    """相机操作错误（信息直接面向用户，中文）。"""
+    """相机操作错误（信息直接面向用户，中文）。
+
+    ``status`` 为可选的 HTTP 语义建议（400/404/409/503/500）：
+    IC4 路径按官方 ErrorCode 分类给出；Mock 路径不设置，
+    main.raise_cam_err 回落到原有的中文信息匹配，行为不变。
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _prop(name, label, value, ptype, *, min_=None, max_=None, step=None,
@@ -416,31 +428,95 @@ class MockCamera(BaseCamera):
 
 _IC4_LIB = None
 _IC4_LIB_ERROR: str | None = None
-_IC4_INFOS: list = []
+_IC4_LOAD_LOCK = threading.Lock()
+
+# ic4 官方 ErrorCode（api-reference.html → Error Handling → ErrorCode）到本服务
+# HTTP 语义的映射；未列出的错误码回落 500。参照契约 docs/api.md §1：
+# 400 参数错误 / 404 不存在 / 409 状态冲突 / 503 相机不可用 / 500 内部错误。
+_IC4_CODE_STATUS = {
+    3: 409,    # InvalidOperation：当前状态下不允许该操作
+    4: 500,    # OutOfMemory
+    5: 503,    # LibraryNotInitialized
+    6: 500,    # DriverError
+    7: 400,    # InvalidParamVal
+    8: 500,    # ConversionNotSupported
+    9: 503,    # NoData
+    13: 503,   # DeviceInvalid：设备被拔出/失效
+    16: 404,   # DeviceNotFound
+    17: 503,   # DeviceError
+    18: 400,   # Ambiguous：设备标识不唯一
+    21: 400,   # ParseError
+    27: 503,   # Timeout
+    34: 500,   # Incomplete
+    38: 409,   # SinkNotConnected
+    39: 500,   # ImageTypeMismatch
+    40: 409,   # SinkAlreadyAttached
+    41: 409,   # SinkConnectAborted
+    50: 500,   # BufferTooSmall
+    52: 500,   # SinkTypeMismatch
+    53: 409,   # SnapAborted
+    101: 400,  # GenICamFeatureNotFound：属性不存在
+    102: 409,  # GenICamDeviceError
+    103: 400,  # GenICamTypeMismatch
+    106: 409,  # GenICamAccessDenied：属性当前不可访问/被锁
+    107: 400,  # GenICamNotImplemented
+    108: 400,  # GenICamValueError：值非法/越界
+    109: 500,  # GenICamChunkdataNotConnected
+}
+
+
+def _ic4_exc_status(exc: Exception) -> int | None:
+    """从 ic4.IC4Exception.code 映射 HTTP 状态；非 ic4 异常返回 None。"""
+    code = getattr(exc, "code", None)
+    if code is None:
+        return None
+    try:
+        return _IC4_CODE_STATUS.get(int(code))
+    except (TypeError, ValueError):
+        return None
+
+
+def _device_serial(info) -> str:
+    """DeviceInfo 序列号（serial 可能为空，此时回落到 unique_name）。
+
+    依据 guide-device-enumeration.html：DeviceInfo 提供 model_name/serial/
+    unique_name；serial 格式设备相关，并不保证非空。
+    """
+    serial = getattr(info, "serial", "")
+    if serial:
+        return str(serial)
+    unique = getattr(info, "unique_name", "")
+    return str(unique) if unique else "unknown"
 
 
 def _load_ic4():
-    """懒加载 imagingcontrol4；不可用时返回 (module|None, error)。"""
+    """懒加载 imagingcontrol4；不可用时返回 (module|None, error)。
+
+    Library.init() 只调用一次（guide-getting-started.html：初始化后才能
+    DeviceEnum.devices()）；加锁防止并发首次加载时的重复 init。
+    """
     global _IC4_LIB, _IC4_LIB_ERROR
-    if _IC4_LIB is not None:
-        return _IC4_LIB, None
-    if _IC4_LIB_ERROR is not None:
-        return None, _IC4_LIB_ERROR
-    try:
-        import imagingcontrol4 as ic4  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        _IC4_LIB_ERROR = (
-            "该平台无法加载 imagingcontrol4。请确认在 Windows 采集主机上已安装 "
-            "TIS ic4 驱动并执行 pip install imagingcontrol4。原始错误："
-            f"{exc.__class__.__name__}: {exc}")
-        return None, _IC4_LIB_ERROR
-    try:
-        ic4.Library.init()
-        _IC4_LIB = ic4
-        return ic4, None
-    except Exception as exc:  # noqa: BLE001
-        _IC4_LIB_ERROR = f"imagingcontrol4 初始化失败：{exc}"
-        return None, _IC4_LIB_ERROR
+    with _IC4_LOAD_LOCK:
+        if _IC4_LIB is not None:
+            return _IC4_LIB, None
+        if _IC4_LIB_ERROR is not None:
+            return None, _IC4_LIB_ERROR
+        try:
+            import imagingcontrol4 as ic4  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            _IC4_LIB_ERROR = (
+                "该平台无法加载 imagingcontrol4。请确认采集主机已安装与相机匹配的 "
+                "ic4 驱动（GenTL producer）并执行 pip install imagingcontrol4"
+                "（Windows/Linux 请选择与主机架构匹配的 wheel）。原始错误："
+                f"{exc.__class__.__name__}: {exc}")
+            return None, _IC4_LIB_ERROR
+        try:
+            ic4.Library.init()
+            _IC4_LIB = ic4
+            return ic4, None
+        except Exception as exc:  # noqa: BLE001
+            _IC4_LIB_ERROR = f"imagingcontrol4 初始化失败：{exc}"
+            return None, _IC4_LIB_ERROR
 
 
 def ic4_available() -> bool:
@@ -450,7 +526,6 @@ def ic4_available() -> bool:
 
 def enumerate_ic4_devices() -> list[dict]:
     """枚举 ic4 设备（失败返回空列表，不影响 mock 路径）。"""
-    global _IC4_INFOS
     lib, _ = _load_ic4()
     if lib is None:
         return []
@@ -458,143 +533,462 @@ def enumerate_ic4_devices() -> list[dict]:
         infos = list(lib.DeviceEnum.devices())
     except Exception:  # noqa: BLE001
         return []
-    _IC4_INFOS = infos
     out = []
     for info in infos:
-        serial = getattr(info, "serial", "") or "unknown"
+        serial = _device_serial(info)
         name = getattr(info, "model_name", "") or "IC4 Camera"
         out.append({"id": f"ic4-{serial}", "name": str(name),
                     "serial": str(serial), "kind": "ic4", "connected": False})
     return out
 
 
+def _make_queue_sink(lib):
+    """按官方 API 构造 QueueSink。
+
+    api-reference.html → Sinks → QueueSink：
+    - 第一个位置参数必须是 QueueSinkListener 实例（当前实现误传 PixelFormat）；
+    - sink_connected 返回 True 时，sink 自动分配流所需的最小缓冲数；
+    - accepted_pixel_formats=[Mono16] 让 ic4 在必要时插入 12-bit→Mono16 的
+      自动转换（numpy_wrap/numpy_copy 仅支持 Mono8/Mono16 等格式，不支持
+      Mono12p/Mono12Packed）；
+    - max_output_buffers 限制输出队列，防止抓取线程跟不上时缓冲无限堆积。
+    """
+    class _Listener(lib.QueueSinkListener):
+        def sink_connected(self, sink, image_type, min_buffers_required):
+            # 官方示例：无需自定义缓冲分配时返回 True，sink 自动分配
+            return True
+
+        def frames_queued(self, sink):
+            pass
+
+        def sink_disconnected(self, sink):
+            pass
+
+    formats = []
+    mono16 = getattr(lib.PixelFormat, "Mono16", None)
+    if mono16 is not None:
+        formats.append(mono16)
+    return lib.QueueSink(_Listener(), accepted_pixel_formats=formats,
+                         max_output_buffers=2)
+
+
 class IC4Camera(BaseCamera):
-    """imagingcontrol4 真机封装（与 MockCamera 同一接口）。"""
+    """imagingcontrol4 真机封装（与 MockCamera 同一接口）。
+
+    ic4 Grabber 状态机（technical-grabber-states.html）：
+        Initial --device_open--> Device Opened --stream_setup--> Streaming
+        --ACQUISITION_START--> Acquisition Active
+        stream_stop --> Device Opened；device_close --> Initial。
+    本实现：open() 只 device_open；首次 grab_frame() 时 stream_setup()
+    （默认 StreamSetupOption.ACQUISITION_START，官方 API 没有 stream_start）；
+    close() 按 stream_stop → device_close 顺序回到 Initial。
+    """
 
     kind = "ic4"
+
+    # 契约属性名 → (PropId 常量名, 契约类型, 中文标签, 固定单位)
+    # PropId 常量见 api-reference.html → PropId（EXPOSURE_TIME、GAIN…）；
+    # 注意：官方常量是 EXPOSURE_TIME，不是 EXPOSURE。
+    _SPEC = (
+        ("exposure", "EXPOSURE_TIME", "float", "曝光", "us"),
+        ("gain", "GAIN", "float", "增益", "dB"),
+        ("black_level", "BLACK_LEVEL", "int", "黑电平", "ADU"),
+        ("width", "WIDTH", "int", "ROI 宽度", "px"),
+        ("height", "HEIGHT", "int", "ROI 高度", "px"),
+        ("offset_x", "OFFSET_X", "int", "ROI X 偏移", "px"),
+        ("offset_y", "OFFSET_Y", "int", "ROI Y 偏移", "px"),
+        ("reverse_x", "REVERSE_X", "bool", "水平镜像", ""),
+        ("reverse_y", "REVERSE_Y", "bool", "垂直镜像", ""),
+        ("trigger_mode", "TRIGGER_MODE", "bool", "触发模式", ""),
+        ("device_temperature", "DEVICE_TEMPERATURE", "float", "传感器温度", "°C"),
+    )
+    _SPEC_BY_NAME = {s[0]: s for s in _SPEC}
+    _READONLY_NAMES = {"device_temperature"}
+    GRAB_TIMEOUT_MS = 5000
 
     def __init__(self, cam_id: str, name: str, serial: str):
         super().__init__(cam_id, name, serial)
         self._grabber = None
         self._sink = None
+        self._lib = None
         self._streaming = False
+        self._lock = threading.RLock()
+        self._close_requested = threading.Event()
+        # 成功让设备原生输出 Mono16 后恒按 >>4 归一到低 12 位：
+        # DMK 33GX249e 官方技术手册 §5.1.1.3：Mono16 像素数据在高 12 位。
+        self._always_shift_mono16 = False
 
     # ---------------------------------------------------------------- 开关
     def open(self) -> None:
-        lib, err = _load_ic4()
-        if lib is None:
-            raise CameraError(err or "该平台无法加载 imagingcontrol4")
+        with self._lock:
+            if self._opened and self._grabber is not None:
+                if self._grabber.is_device_open and self._grabber.is_device_valid:
+                    return  # 幂等：防止重复 device_open
+                # 设备已失效（DeviceInvalid 状态）：先释放旧 Grabber 再重开
+                self._discard_grabber(self._grabber)
+                self._reset_fields()
+            lib, err = _load_ic4()
+            if lib is None:
+                raise CameraError(err or "该平台无法加载 imagingcontrol4",
+                                  status=503)
+            self._close_requested.clear()
+            grabber = None
+            try:
+                infos = list(lib.DeviceEnum.devices())
+                target = None
+                for info in infos:
+                    if _device_serial(info) == self.serial:
+                        target = info
+                        break
+                if target is None:
+                    raise CameraError(f"未找到序列号为 {self.serial} 的 ic4 设备",
+                                      status=404)
+                # device_open 支持 DeviceInfo 或字符串（api-reference → Grabber.
+                # device_open(dev: DeviceInfo | str)）。用枚举到的 DeviceInfo 打开，
+                # 避免字符串标识歧义（ErrorCode.Ambiguous）。
+                grabber = lib.Grabber()
+                grabber.device_open(target)
+                if not grabber.is_device_open:
+                    raise CameraError(f"ic4 设备 {self.name} 打开后状态异常",
+                                      status=503)
+                sink = _make_queue_sink(lib)
+                # 全部成功后才发布到实例状态，失败路径不会留下半开 Grabber
+                self._always_shift_mono16 = self._try_set_native_mono16(grabber, lib)
+                self._grabber = grabber
+                self._sink = sink
+                self._lib = lib
+                self._opened = True
+            except CameraError:
+                self._discard_grabber(grabber)
+                self._reset_fields()
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._discard_grabber(grabber)
+                self._reset_fields()
+                raise CameraError(f"打开 ic4 设备失败（{self.name}）：{exc}",
+                                  status=_ic4_exc_status(exc) or 503)
+
+    def _reset_fields(self) -> None:
+        self._grabber = None
+        self._sink = None
+        self._lib = None
+        self._streaming = False
+        self._opened = False
+
+    def _try_set_native_mono16(self, grabber, lib) -> bool:
+        """尽量让设备原生输出 Mono16；成功返回 True（高 12 位，需 >>4）。
+
+        guide-configuring-device.html：在 Device Opened 状态通过
+        device_property_map 配置；PropertyMap.try_set_value 对不存在的属性
+        不抛异常、返回 False。api-reference → PropertyMap：int 参数对枚举属性
+        仅在 PixelFormat 上生效，恰好适用这里。
+        """
         try:
-            infos = list(lib.DeviceEnum.devices())
-            target = None
-            for info in infos:
-                if str(getattr(info, "serial", "")) == self.serial:
-                    target = info
-                    break
-            if target is None:
-                raise CameraError(f"未找到序列号为 {self.serial} 的 ic4 设备")
-            self._grabber = lib.Grabber()
-            self._grabber.device_open(target)
-            self._sink = lib.QueueSink(
-                getattr(lib.PixelFormat, "Mono12p", None)
-                or getattr(lib.PixelFormat, "Mono12"))
-            self._opened = True
-        except CameraError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            self._grabber = None
-            raise CameraError(f"打开 ic4 设备失败（{self.name}）：{exc}")
+            mono16 = getattr(lib.PixelFormat, "Mono16", None)
+            if mono16 is None:
+                return False
+            pmap = grabber.device_property_map
+            if not pmap.try_set_value(lib.PropId.PIXEL_FORMAT, mono16):
+                return False  # 设备不支持 Mono16 → 走 sink 的 12-bit→Mono16 转换
+            try:
+                fmt = pmap.get_value_str(lib.PropId.PIXEL_FORMAT)
+                return fmt == "Mono16"
+            except Exception:  # noqa: BLE001
+                return True  # 已成功 set，回读失败仍按 Mono16 处理
+        except Exception:  # noqa: BLE001
+            _log.warning("ic4 PIXEL_FORMAT 配置失败，使用 sink 自动转换",
+                         exc_info=True)
+            return False
+
+    @staticmethod
+    def _discard_grabber(grabber) -> None:
+        """回收半初始化 Grabber（stream_stop → device_close）。"""
+        if grabber is None:
+            return
+        try:
+            if grabber.is_streaming:
+                grabber.stream_stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if grabber.is_device_open:
+                grabber.device_close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
-        try:
-            if self._streaming and self._grabber is not None:
-                self._grabber.stream_stop()
-        finally:
+        self._close_requested.set()   # 让阻塞中的 pop 循环尽快退出
+        with self._lock:
+            grabber = self._grabber
             self._streaming = False
             self._grabber = None
             self._sink = None
+            self._lib = None
             self._opened = False
+            if grabber is None:
+                return
+            # 状态机顺序：stream_stop（Streaming→Device Opened）→ device_close
+            # （→Initial）。设备已失效时两调用可能抛错，忽略并继续清理。
+            try:
+                if grabber.is_streaming:
+                    grabber.stream_stop()
+            except Exception:  # noqa: BLE001
+                _log.warning("ic4 stream_stop 失败（设备可能已断开）",
+                             exc_info=True)
+            try:
+                if grabber.is_device_open:
+                    grabber.device_close()
+            except Exception:  # noqa: BLE001
+                _log.warning("ic4 device_close 失败（设备可能已断开）",
+                             exc_info=True)
 
     def _ensure_open(self):
         if not self._opened or self._grabber is None:
-            raise CameraError("设备未打开")
+            raise CameraError("设备未打开", status=409)
+        if not self._grabber.is_device_valid:
+            raise CameraError("相机连接已断开，请检查连接后重新打开设备",
+                              status=503)
+        return self._grabber
 
     # ---------------------------------------------------------------- 帧
     def grab_frame(self) -> np.ndarray:
-        self._ensure_open()
-        try:
-            if not self._streaming:
-                self._grabber.stream_setup(self._sink)
-                self._grabber.stream_start()
+        with self._lock:
+            grabber = self._ensure_open()
+            try:
+                if not grabber.is_streaming:
+                    # 官方 API 无 stream_start()：stream_setup 默认
+                    # StreamSetupOption.ACQUISITION_START，建流即开始采集。
+                    grabber.stream_setup(self._sink)
                 self._streaming = True
-            buf = self._sink.pop_output_buffer(timeout_ms=5000)
-            arr = buf.numpy_wrap()
-            img = np.asarray(arr, dtype=np.uint16)
-            return np.array(img, dtype=np.uint16, copy=True)
-        except Exception as exc:  # noqa: BLE001
-            raise CameraError(f"ic4 抓帧失败：{exc}")
+                buf = self._pop_with_timeout(self.GRAB_TIMEOUT_MS)
+                try:
+                    # numpy_copy 拷贝数据；随后立即 release 把缓冲还给 sink 的
+                    # 空闲队列，避免长期占用设备内存。
+                    arr = buf.numpy_copy()
+                finally:
+                    try:
+                        buf.release()
+                    except Exception:  # noqa: BLE001
+                        pass
+                img = np.asarray(arr, dtype=np.uint16)
+                if img.ndim == 3 and img.shape[2] == 1:
+                    img = img[:, :, 0]
+                img = self._normalize_12bit(img)
+                return np.ascontiguousarray(img, dtype=np.uint16)
+            except CameraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"ic4 抓帧失败：{exc}",
+                                  status=_ic4_exc_status(exc) or 503)
+
+    def _pop_with_timeout(self, timeout_ms: int):
+        """官方 pop_output_buffer() 无 timeout 参数且阻塞；用
+        try_pop_output_buffer()（文档明确说明不抛异常、无帧返回 None）
+        轮询实现超时语义。
+        """
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            if self._close_requested.is_set():
+                raise CameraError("设备已关闭", status=409)
+            try:
+                buf = self._sink.try_pop_output_buffer()
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"读取相机图像失败：{exc}",
+                                  status=_ic4_exc_status(exc) or 503)
+            if buf is not None:
+                return buf
+            if time.monotonic() >= deadline:
+                raise CameraError(
+                    f"等待相机图像超时（{timeout_ms}ms），"
+                    "请检查相机连接或触发模式设置", status=503)
+            time.sleep(0.005)
+
+    def _normalize_12bit(self, img: np.ndarray) -> np.ndarray:
+        """把 Mono16 图像归一化为契约口径：uint16、数值 ≤4095（低 12 位）。
+
+        依据 DMK 33GX249e 官方技术手册 §5.1.1.3：12-bit 传感器的 Mono16
+        数据位于高 12 位，必须右移 4 位。设备原生 Mono16 成功时恒右移；
+        sink 自动转换路径（设备不支持 Mono16 时）做最大值为依据的自适应，
+        该分支未经真机验证，见 docs/reviews/ic4-doc-audit.md。
+        """
+        if self._always_shift_mono16:
+            np.right_shift(img, 4, out=img)
+            return img
+        if img.size and int(img.max()) > 4095:
+            np.right_shift(img, 4, out=img)
+        return img
 
     # ---------------------------------------------------------------- 属性
+    def _pmap(self):
+        return self._ensure_open().device_property_map
+
+    def _pid(self, name: str):
+        lib = self._lib
+        attr = self._SPEC_BY_NAME[name][1]
+        return getattr(lib.PropId, attr)
+
+    @staticmethod
+    def _range_details(prop, lib):
+        """读取 int/float 属性的 min/max/step（PropertyMap 没有 get_range）。
+
+        api-reference：PropInteger/PropFloat 提供 minimum/maximum/
+        increment_mode/increment/valid_value_set；Property 提供
+        is_readonly/is_available/is_locked/type。
+        """
+        lo = float(prop.minimum)
+        hi = float(prop.maximum)
+        val = float(prop.value)
+        step = 1.0
+        try:
+            mode = prop.increment_mode
+        except Exception:  # noqa: BLE001
+            mode = None
+        if mode == lib.PropertyIncrementMode.INCREMENT:
+            try:
+                step = float(prop.increment)
+            except Exception:  # noqa: BLE001
+                step = 1.0
+        elif mode == lib.PropertyIncrementMode.VALUE_SET:
+            try:
+                vals = sorted(float(v) for v in prop.valid_value_set)
+                if len(vals) > 1:
+                    step = min(b - a for a, b in zip(vals, vals[1:]))
+            except Exception:  # noqa: BLE001
+                step = 1.0
+        elif prop.type == lib.PropertyType.FLOAT:
+            # Float increment_mode==NONE：任意值合法，给出一个无害的 UI 步进
+            step = max((hi - lo) / 1000.0, 1e-9)
+        return val, lo, hi, max(step, 1e-9 if prop.type == lib.PropertyType.FLOAT
+                               else 1.0)
+
+    @staticmethod
+    def _prop_unit(prop) -> str:
+        try:
+            return str(prop.unit or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _read_prop(self, pmap, name: str) -> dict:
+        _, _, ptype, label, unit = self._SPEC_BY_NAME[name]
+        lib = self._lib
+        pid = self._pid(name)
+        prop = pmap.find(pid)
+        if not prop.is_available:
+            raise CameraError(f"属性 {name} 当前不可用", status=409)
+        readonly = bool(prop.is_readonly)
+        if ptype == "bool":
+            try:
+                value = pmap.get_value_bool(pid)
+            except Exception:  # noqa: BLE001
+                # TriggerMode 在部分相机上是枚举（On/Off），按字符串归一化
+                s = str(pmap.get_value_str(pid))
+                value = s.strip().lower() in ("on", "true", "1")
+            return _prop(name, label, bool(value), "bool", readonly=readonly)
+        val, lo, hi, step = self._range_details(prop, lib)
+        if ptype == "int":
+            actual = int(round(val))
+        else:
+            actual = float(val)
+        return _prop(name, label, actual, ptype, min_=lo, max_=hi, step=step,
+                     unit=unit or self._prop_unit(prop), readonly=readonly)
+
     def get_properties(self) -> list[dict]:
-        self._ensure_open()
-        props = []
-        pmap = self._grabber.device_property_map
-        spec = [
-            ("exposure", "曝光", "EXPOSURE", "float", "us"),
-            ("gain", "增益", "GAIN", "float", "dB"),
-            ("black_level", "黑电平", "BLACK_LEVEL", "int", "ADU"),
-            ("reverse_x", "水平镜像", "REVERSE_X", "bool", ""),
-            ("reverse_y", "垂直镜像", "REVERSE_Y", "bool", ""),
-            ("trigger_mode", "触发模式", "TRIGGER_MODE", "bool", ""),
-            ("device_temperature", "传感器温度", "DEVICE_TEMPERATURE", "float", "°C"),
-        ]
-        for name, label, propid, ptype, unit in spec:
+        with self._lock:
+            pmap = self._pmap()
+            props = []
+            for name in (s[0] for s in self._SPEC):
+                try:
+                    props.append(self._read_prop(pmap, name))
+                except Exception:  # noqa: BLE001
+                    continue  # 相机不支持/暂时不可用的属性按契约跳过
+            return props
+
+    def get_property(self, name: str) -> Any:
+        with self._lock:
+            if name not in self._SPEC_BY_NAME:
+                raise CameraError(f"未知属性：{name}", status=400)
             try:
-                pid = getattr(__import__("imagingcontrol4").PropId, propid)
-            except Exception:  # noqa: BLE001
-                pid = propid
+                return self._read_prop(self._pmap(), name)["value"]
+            except CameraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"读取属性 {name} 失败：{exc}",
+                                  status=_ic4_exc_status(exc) or 400)
+
+    def _coerce_value(self, prop, name: str, value: Any, ptype: str):
+        lib = self._lib
+        if ptype == "bool":
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "on", "1", "yes"):
+                    return True
+                if v in ("false", "off", "0", "no"):
+                    return False
+                raise CameraError(f"属性 {name} 需要布尔值", status=400)
+            if not isinstance(value, (bool, int, float)):
+                raise CameraError(f"属性 {name} 需要布尔值", status=400)
+            return bool(value)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise CameraError(f"属性 {name} 需要数值", status=400)
+        val, lo, hi, _ = self._range_details(prop, lib)
+        v = min(max(v, lo), hi)              # 契约：越界值自动钳制
+        try:
+            mode = prop.increment_mode
+        except Exception:  # noqa: BLE001
+            mode = None
+        if mode == lib.PropertyIncrementMode.VALUE_SET:
             try:
-                raw = pmap.get_value(pid)
-                p = _prop(name, label, raw, ptype,
-                          min_=pmap.get_range(pid)[0], max_=pmap.get_range(pid)[1],
-                          step=pmap.get_range(pid)[2] if hasattr(pmap, "get_range") else None,
-                          unit=unit, readonly=pmap.get_visibility(pid) != "rw")
-                props.append(p)
+                valid = sorted(float(x) for x in prop.valid_value_set)
+                v = min(valid, key=lambda x: abs(x - v))
             except Exception:  # noqa: BLE001
-                continue
-        # ROI（尽力枚举，失败时跳过）
-        for name, label, unit in [("width", "ROI 宽度", "px"),
-                                  ("height", "ROI 高度", "px"),
-                                  ("offset_x", "ROI X 偏移", "px"),
-                                  ("offset_y", "ROI Y 偏移", "px")]:
+                pass
+        elif mode == lib.PropertyIncrementMode.INCREMENT:
             try:
-                pid = getattr(__import__("imagingcontrol4").PropId, name.upper())
-                v = int(pmap.get_value(pid))
-                props.append(_prop(name, label, v, "int", min_=0, max_=1_000_000,
-                                   step=1, unit=unit))
+                inc = float(prop.increment)
+                if inc > 0:
+                    v = lo + round((v - lo) / inc) * inc
             except Exception:  # noqa: BLE001
-                continue
-        return props
+                pass
+        v = min(max(v, lo), hi)
+        return int(round(v)) if ptype == "int" else float(v)
 
     def set_property(self, name: str, value: Any) -> Any:
-        self._ensure_open()
-        pmap = self._grabber.device_property_map
-        pid_map = {
-            "exposure": "EXPOSURE", "gain": "GAIN", "black_level": "BLACK_LEVEL",
-            "reverse_x": "REVERSE_X", "reverse_y": "REVERSE_Y",
-            "trigger_mode": "TRIGGER_MODE", "width": "WIDTH", "height": "HEIGHT",
-            "offset_x": "OFFSET_X", "offset_y": "OFFSET_Y",
-        }
-        if name not in pid_map:
-            raise CameraError(f"未知属性：{name}")
-        try:
-            ic4 = __import__("imagingcontrol4")
-            pid = getattr(ic4.PropId, pid_map[name])
-            pmap.set_value(pid, value)
-            actual = pmap.get_value(pid)
-            return actual
-        except Exception as exc:  # noqa: BLE001
-            raise CameraError(f"设置属性 {name} 失败：{exc}")
+        with self._lock:
+            grabber = self._ensure_open()
+            if name not in self._SPEC_BY_NAME:
+                raise CameraError(f"未知属性：{name}", status=400)
+            if name in self._READONLY_NAMES:
+                raise CameraError(f"属性 {name} 只读", status=400)
+            _, _, ptype, _label, _unit = self._SPEC_BY_NAME[name]
+            lib = self._lib
+            pid = self._pid(name)
+            pmap = grabber.device_property_map
+            try:
+                prop = pmap.find(pid)
+                if not prop.is_available:
+                    raise CameraError(f"属性 {name} 当前不可用", status=409)
+                if prop.is_readonly:
+                    raise CameraError(f"属性 {name} 只读", status=400)
+                if prop.is_locked:
+                    raise CameraError(
+                        f"属性 {name} 当前被锁定，请先停止采集或关闭自动控制",
+                        status=409)
+                actual_arg = self._coerce_value(prop, name, value, ptype)
+                pmap.set_value(pid, actual_arg)
+            except CameraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"设置属性 {name} 失败：{exc}",
+                                  status=_ic4_exc_status(exc) or 400)
+            try:
+                return self._read_prop(pmap, name)["value"]
+            except CameraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"设置属性 {name} 后回读失败：{exc}",
+                                  status=_ic4_exc_status(exc) or 500)
 
 
 class CameraService:

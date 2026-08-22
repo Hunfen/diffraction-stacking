@@ -16,7 +16,8 @@
 { "ok": false, "data": null, "error": "<中文错误信息>" }
 ```
 
-- `ok=false` 时 HTTP 状态码按语义给出：400（参数错误）、404（不存在）、409（状态冲突）、500（内部错误）
+- `ok=false` 时 HTTP 状态码按语义给出：400（参数错误）、404（不存在）、409（状态冲突）、
+  500（内部错误）、503（依赖不可用，如平台无法加载 imagingcontrol4）
 - 500 响应统一返回 `error:"服务器内部错误"`，不泄漏内部异常细节
 - 时间格式：ISO 8601（`YYYY-MM-DDTHH:MM:SS`，本地时区，不带 Z）；FITS `DATE-OBS` 精确到毫秒（`YYYY-MM-DDTHH:MM:SS.mmm`）
 - 帧数据口径：相机 12-bit，内存 uint16，数值 ≤ 4095；FITS 16-bit 存储、数据在低 12 位

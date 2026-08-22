@@ -258,6 +258,16 @@ async def generic_handler(request: Request, exc: Exception):
 
 def raise_cam_err(exc: Exception) -> None:
     msg = str(exc)
+    # IC4 路径：camera.py 已按官方 ErrorCode 归类为 400/404/409/503/500，
+    # 通过 CameraError.status 传递，优先使用；Mock 路径继续走信息匹配。
+    status = getattr(exc, "status", None)
+    if status == 500:
+        # 契约：500 统一返回“服务器内部错误”，不向客户端泄漏异常细节
+        logging.getLogger("uvicorn.error").error(
+            "ic4 camera error: %s", exc, exc_info=True)
+        raise HTTPException(500, "服务器内部错误")
+    if status in (400, 404, 409, 503):
+        raise HTTPException(status, msg)
     if "设备未打开" in msg or "设备已关闭" in msg:
         raise HTTPException(409, msg)
     if "无法加载 imagingcontrol4" in msg:
@@ -367,7 +377,10 @@ def device_close():
 
 @app.get("/api/device/info")
 def device_info():
-    return ok(camera_service.device_info())
+    try:
+        return ok(camera_service.device_info())
+    except Exception as exc:  # noqa: BLE001
+        raise_cam_err(exc)
 
 
 # =========================================================================
