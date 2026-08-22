@@ -46,12 +46,19 @@ const PHASE_LABELS: Record<PhaseType, string> = {
   light: '亮场 Light',
 };
 
+const PHASE_EN_LABELS: Record<PhaseType, string> = {
+  bias: 'Bias',
+  dark: 'Dark',
+  flat: 'Flat',
+  light: 'Light',
+};
+
 const ALL_PHASE_TYPES: PhaseType[] = ['bias', 'dark', 'flat', 'light'];
 
 const JOB_TYPE_LABELS: Record<JobEventData['type'], string> = {
   calibrate: '标定（Master 合成）',
   stack: '叠加',
-  stretch: '拉伸预览',
+  stretch: '重标定预览',
 };
 
 const JOB_STATUS_META: Record<JobEventData['status'], { color: string; text: string }> = {
@@ -260,6 +267,20 @@ export default function ProcessingPage() {
     });
   };
 
+  /** 场级全选：勾选 = 该场全部纳入；取消 = 该场全部进入 exclude */
+  const togglePhaseAll = (type: PhaseType, checked: boolean) => {
+    const frames = detail?.frames?.[type] ?? [];
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      frames.forEach((f) => {
+        const key = frameKey(type, f.file);
+        if (checked) next.delete(key);
+        else next.add(key);
+      });
+      return next;
+    });
+  };
+
   /** calibrate / stack 请求体统一携带：未勾选帧按相位分组进 exclude */
   const buildExclude = useCallback((): ExcludeMap => {
     const map: ExcludeMap = { bias: [], dark: [], flat: [], light: [] };
@@ -275,6 +296,26 @@ export default function ProcessingPage() {
   const excludedCountTotal = useMemo(
     () => ALL_PHASE_TYPES.reduce((acc, t) => acc + (buildExclude()[t]?.length ?? 0), 0),
     [buildExclude],
+  );
+
+  /** 每个场当前纳入（勾选）的帧数，按 ALL_PHASE_TYPES 顺序展示 */
+  const includedByPhase = useMemo(() => {
+    const counts: Record<PhaseType, number> = { bias: 0, dark: 0, flat: 0, light: 0 };
+    if (!detail) return counts;
+    ALL_PHASE_TYPES.forEach((t) => {
+      counts[t] = (detail.frames?.[t] ?? []).filter((f) => !excluded.has(frameKey(t, f.file))).length;
+    });
+    return counts;
+  }, [detail, excluded]);
+
+  const includedCountTotal = useMemo(
+    () => ALL_PHASE_TYPES.reduce((acc, t) => acc + includedByPhase[t], 0),
+    [includedByPhase],
+  );
+
+  const inclusionSummary = useMemo(
+    () => ALL_PHASE_TYPES.map((t) => `${PHASE_EN_LABELS[t]} ${includedByPhase[t]}`).join(' / '),
+    [includedByPhase],
   );
 
   const runCalibrate = async () => {
@@ -323,7 +364,7 @@ export default function ProcessingPage() {
 
   const runStretch = async () => {
     if (!selectedId || !selectedResult) {
-      message.warning('请选择要拉伸的结果文件');
+      message.warning('请选择要重标定的结果文件');
       return;
     }
     // Bug A 修复 (a)：提交时立即自增 ?v=，即使 WS/轮询事件丢失，图片也会先强制刷新一次；
@@ -381,15 +422,15 @@ export default function ProcessingPage() {
   // 步骤条 current：calibrate 完成后进入 Stack 步；stack 完成后进入 Stretch 步；stretch 完成则全部完成
   const stepCurrent = stretchDone ? 3 : stackDone ? 2 : calibrateDone ? 1 : 0;
   const stackHint = !calibrateDone
-    ? '请先完成步骤 1 · Calibrate，再运行 Stack。'
+    ? '请先完成步骤 1 · Construct Bias/Dark/Flat Master & Calibrate，再运行 Stack。'
     : stackActive
       ? 'Stack 任务运行中…'
       : 'Calibrate 已完成，建议运行 Stack。';
   const stretchHint = !stackDone
-    ? '请先完成步骤 2 · Stack，再运行 Stretch。'
+    ? '请先完成步骤 2 · Stacking Light Field，再运行 Rescale。'
     : stretchActive
-      ? 'Stretch 任务运行中…'
-      : 'Stack 已完成，可以应用 Stretch 并刷新预览。';
+      ? 'Rescale 任务运行中…'
+      : 'Stack 已完成，可以应用 Rescale 并刷新预览。';
 
   const selectedResultInfo = detail?.results.find((r) => r.file === selectedResult) ?? null;
   const previewUrl = selectedResultInfo
@@ -455,7 +496,19 @@ export default function ProcessingPage() {
               const excludedCount = frames.filter((f) => excluded.has(frameKey(t, f.file))).length;
               return (
                 <Col xs={24} md={12} lg={6} key={t}>
-                  <Card size="small" type="inner" title={`${PHASE_LABELS[t]}（${frames.length}）`}>
+                  <Card
+                    size="small"
+                    type="inner"
+                    title={`${PHASE_LABELS[t]}（${frames.length}）`}
+                    extra={
+                      <Checkbox
+                        checked={excludedCount === 0}
+                        onChange={(e) => togglePhaseAll(t, e.target.checked)}
+                      >
+                        全选
+                      </Checkbox>
+                    }
+                  >
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                       计划 {detail.phases.find((p) => p.type === t)?.count ?? 0} 张 · 未勾选（将排除）{excludedCount}
                     </Typography.Text>
@@ -496,20 +549,20 @@ export default function ProcessingPage() {
         )}
       </Card>
 
-      <Card size="small" title="处理管线（Calibrate → Stack → Stretch）">
+      <Card size="small" title="处理管线（Calibrate → Stack → Rescale）">
         <Steps
           size="small"
           current={stepCurrent}
           items={[
-            { title: '步骤 1：Calibrate', description: '合成 Master 并逐帧标定' },
-            { title: '步骤 2：Stack', description: '叠加 + 可选配准' },
-            { title: '步骤 3：Stretch', description: '拉伸并刷新预览' },
+            { title: 'Step 1 · Construct Bias/Dark/Flat Master & Calibrate', description: '合成 Master 并逐帧标定' },
+            { title: 'Step 2 · Stacking Light Field', description: '叠加 + 可选配准' },
+            { title: 'Step 3 · Rescale & Preview', description: '重标定并刷新预览' },
           ]}
           style={{ marginBottom: 16 }}
         />
         <Row gutter={16}>
           <Col xs={24} lg={8}>
-            <Card size="small" type="inner" title="步骤 1 · Calibrate（sigma-clipped master）">
+            <Card size="small" type="inner" title="Step 1 · Construct Bias/Dark/Flat Master & Calibrate">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Form layout="inline">
                   <Form.Item label="sigma">
@@ -536,13 +589,13 @@ export default function ProcessingPage() {
                   运行 Calibrate（排除未勾选帧）
                 </Button>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  请求体含 exclude：bias {buildExclude().bias.length} / dark {buildExclude().dark.length} / flat {buildExclude().flat.length} / light {buildExclude().light.length}
+                  纳入：{inclusionSummary}（共 {includedCountTotal} 帧）
                 </Typography.Text>
               </Space>
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card size="small" type="inner" title="步骤 2 · Stack">
+            <Card size="small" type="inner" title="Step 2 · Stacking Light Field">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Form layout="inline">
                   <Form.Item label="sigma">
@@ -575,13 +628,13 @@ export default function ProcessingPage() {
                   {stackHint}
                 </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  请求体含 exclude：bias {buildExclude().bias.length} / dark {buildExclude().dark.length} / flat {buildExclude().flat.length} / light {buildExclude().light.length}
+                  纳入：{inclusionSummary}（共 {includedCountTotal} 帧）
                 </Typography.Text>
               </Space>
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card size="small" type="inner" title="步骤 3 · Stretch">
+            <Card size="small" type="inner" title="Step 3 · Rescale & Preview">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Select
                   placeholder="选择结果文件"
@@ -591,7 +644,7 @@ export default function ProcessingPage() {
                   options={(detail?.results ?? []).map((r) => ({ value: r.file, label: r.file }))}
                 />
                 <Space wrap>
-                  <span>stretch：</span>
+                  <span>Rescale：</span>
                   <Radio.Group
                     value={stretchMethod}
                     onChange={(e) => setStretchMethod(e.target.value as StretchMethod)}
@@ -615,13 +668,13 @@ export default function ProcessingPage() {
                   disabled={!selectedResult || !stackDone || stretchActive}
                   onClick={() => void runStretch()}
                 >
-                  应用拉伸并刷新预览
+                  应用重标定并刷新预览
                 </Button>
                 <Typography.Text type={stackDone ? 'secondary' : 'warning'} style={{ fontSize: 12 }}>
                   {stretchHint}
                 </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  拉伸输出覆盖 results/STACK_preview.png（8-bit PNG）。后端返回 Cache-Control: no-store，前端通过 ?v= 版本参数强制刷新。
+                  对叠加结果重新标定显示亮度范围，生成可查看的预览图（8-bit PNG）。
                 </Typography.Text>
               </Space>
             </Card>
@@ -728,7 +781,7 @@ export default function ProcessingPage() {
               <div style={{ marginTop: 12, textAlign: 'center' }}>
                 <Space wrap>
                   <Typography.Text type="secondary">
-                    当前预览（{selectedResult}，stretch 提交 / 完成后自动刷新，?v={previewVersion}）
+                    当前预览（{selectedResult}，Rescale 提交 / 完成后自动刷新）
                   </Typography.Text>
                   <Button size="small" icon={<ReloadOutlined />} onClick={refreshPreview}>
                     刷新预览
@@ -738,7 +791,7 @@ export default function ProcessingPage() {
                   <img
                     key={previewUrl}
                     src={previewUrl}
-                    alt="stretch preview"
+                    alt="重标定预览"
                     style={{ maxWidth: '100%', maxHeight: 560 }}
                     onLoad={(e) => {
                       // 修复预览可见性：成功后复位 onError 设置过的 display:none
