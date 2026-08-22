@@ -1,4 +1,4 @@
-# Diffraction Stacking — 前后端 API 契约 v1.3
+# Diffraction Stacking — 前后端 API 契约 v1.4
 
 > 本文件是后端（FastAPI）与前端（React）之间的**唯一契约**。
 > 前后端必须严格按本文件实现；发现契约歧义时先报告船长，不得各自发挥。
@@ -26,7 +26,9 @@
   `data_root` 由 `GET/PUT /api/settings` 暴露，运行中修改立即生效；启动优先级：
   `DIFF_DATA_ROOT` 环境变量 > `backend/.data_root.json` > `<repo>/data`
 - 文件下载接口 `GET /api/files/{session_id}/{rel_path}`：`rel_path` 允许 `meta.json`、`<group>/<file>`、`<group>/thumbs/<file>`、`results/<file>`；
-  `session_id=snapshots` 时允许根目录文件 `<file>` 与单级子目录文件 `<folder>/<file>`（v1.3）。
+  `session_id=snapshots` 时允许根目录文件 `<file>` 与子目录文件 `<folder>/<file>`（v1.3），
+  v1.4 进一步支持任意深度 `<rel>/<file>`，分别按 `<data_root>/snapshots/<rel>`（旧口径，优先）
+  与 `<data_root>/<rel>`（v1.4 绝对 folder 口径）解析。
   必须做路径穿越防护（不允许绝对路径、`..` 段、路径分隔符滥用与越出目标目录），非法路径返回 400
   - `<group>` ∈ `bias|dark|flat|light`（含 `thumbs/` 子目录）；`masters/` 与 `calibrated/` 目录下的文件同样可直接访问（如 `masters/MASTER_DARK.fits`）
   - 所有 `/api/files/**` 响应头固定带 `Cache-Control: no-store`（v1.2，保证拉伸预览等文件永远取最新版本）
@@ -138,7 +140,7 @@
 - 越界值自动钳制到 min/max，`actual` 为相机实际生效值
 - 未打开设备返回 409
 
-### 2.4 实时预览与抓拍
+### 2.4 实时预览、目录浏览与抓拍
 
 **POST /api/live/start** — body `{ "fps": 15, "scale": 1.0, "quality": 80 }`
 
@@ -161,27 +163,62 @@
 - `histogram` 为 **8-bit 预览图**的 256 bin 直方图（前后端显示口径一致）
 - JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=ROI×scale
 
-**POST /api/snapshot** — body `{ "format": "fits", "folder": "子目录名" }`
+**GET /api/browse/folders**（v1.4）— 目录浏览器数据源（抓拍文件夹选择）
 
-- `format` ∈ `fits`|`tiff`|`png`（缺省 `fits`）
-- `folder`（v1.3）：可选，相对子目录名；缺省/空 → 存 `<data_root>/snapshots/`，
-  非空 → 存 `<data_root>/snapshots/<folder>/`，目录不存在时自动创建（创建失败返回 **400** 英文错误）
+query：`?path=<绝对路径，可空>`
 
 ```json
-{ "ok": true, "data": { "file": "SNP_20260822T10-00-00.fits",
-  "url": "/api/files/snapshots/测试文件夹/SNP_20260822T10-00-00.fits",
-  "folder": "测试文件夹" }, "error": null }
+{ "ok": true, "data": {
+  "path": "/Users/me/diffraction_stacking/data",
+  "parent": null,
+  "files": [],
+  "folders": [
+    { "name": "captures", "path": "/Users/me/diffraction_stacking/data/captures" },
+    { "name": "snapshots", "path": "/Users/me/diffraction_stacking/data/snapshots" }
+  ]
+}, "error": null }
 ```
 
-- folder 缺省/空时返回 `folder:""`、`url` 为 `/api/files/snapshots/<file>`
-- **folder 路径防护**（v1.3）：仅允许单段相对子目录名。以下情况返回 **400**（英文错误）：
-  绝对路径（如 `/abs`）、`..`/`.` 段、路径分隔符 `/` `\`（如 `a/b`、`../evil`）、
-  Windows 非法字符 `< > : " | ? *`（与 `sanitize` 口径一致，本接口选择直接拒绝）
+- `path` 缺省/空 → 当前 `data_root`；否则必须是**已存在的绝对目录**，resolve 后必须
+  `== data_root` 或位于其内部；任何不满足（相对路径、不存在、越界）都返回 **400**
+  `error:"Folder must be inside the data root"`
+- 仅列出**直接子目录**（按名称排序，不列文件）；`files` 恒为 `[]`（契约占位字段）
+- `parent`：上一级绝对路径；当前目录为 `data_root` 顶层时 `parent:null`
+
+**POST /api/snapshot** — body `{ "format": "fits", "folder": "/abs/path/to/dir", "prefix": "spot" }`
+
+- `format` ∈ `fits`|`tiff`|`png`（缺省 `fits`）
+- `folder`（v1.4）：可选。
+  - 缺省/空 → `<data_root>/snapshots/`（兼容旧行为）
+  - **绝对路径**：resolve 后必须 `== data_root` 或位于其内部（越界返回 **400**
+    `"Folder must be inside the data root"`）；目录不存在时自动 `mkdir(parents=True)`，
+    创建失败返回 **400**（英文错误）
+  - **单段相对名**（v1.3 兼容，如 `"测试文件夹"`）：映射为 `<data_root>/snapshots/<name>`；
+    仍禁止 `..`/`.` 段、路径分隔符 `/` `\` 与 Windows 非法字符 `< > : " | ? *`（400 英文错误）
+- `prefix`（v1.4）：可选。sanitize 口径：路径分隔符与 `< > : " | ? *` 及空白统一替换为
+  `_`，允许为空；非 ASCII 字符（如中文）保留
+- **文件名恒带时间戳**（v1.4）：
+  - 有 prefix → `<prefix>_<YYYYMMDDTHH-MM-SS>.<ext>`
+  - 无 prefix → `<YYYYMMDDTHH-MM-SS>.<ext>`
+
+```json
+{ "ok": true, "data": {
+  "file": "spot_20260822T10-00-00.fits",
+  "url": "/api/files/snapshots/2026_observing/spot_20260822T10-00-00.fits",
+  "folder": "/Users/me/diffraction_stacking/data/2026_observing",
+  "prefix": "spot"
+}, "error": null }
+```
+
+- 响应 `folder` 恒为**绝对路径**；`prefix` 为 sanitize 后的值（缺省/空时为 `""`）
+- `url`：folder 位于 `<data_root>/snapshots/` 内时使用旧口径
+  `/api/files/snapshots/<rel-to-snapshots>/<file>`（根目录无中间段）；
+  其余 data_root 内目录使用 `/api/files/snapshots/<rel-to-data_root>/<file>`
 - 快照 16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
 - 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`）
 - 未打开设备返回 409
 
-**GET /api/snapshot/folders**（v1.3）— 列出快照文件夹
+**GET /api/snapshot/folders**（v1.3 兼容保留；v1.4 前端新流程不再使用，旧调用继续可用）
 
 ```json
 { "ok": true, "data": { "folders": [
@@ -321,7 +358,10 @@
 
 - v1.3：`session_id=snapshots` 时支持根目录文件 `/api/files/snapshots/<file>` 与
   单级子目录文件 `/api/files/snapshots/<folder>/<file>`（folder 与 POST /api/snapshot 同口径校验，
-  路径穿越/越出 `snapshots/` 目录返回 400）
+  路径穿越/越出目录返回 400）
+- v1.4：`session_id=snapshots` 的任意深度 `<rel>/<file>` 依次按
+  `<data_root>/snapshots/<rel>`（旧口径，已存在的文件优先）与 `<data_root>/<rel>`
+  （v1.4 绝对 folder 口径）解析，均必须在 `data_root` 内，穿越/越界返回 400
 - 响应头固定带 `Cache-Control: no-store`。
 
 ### 2.7 数据处理
@@ -386,8 +426,10 @@
 
 ```
 <data_root>/
-  snapshots/SNP_*.{fits,tiff,png}          # folder 缺省/空（根目录）
-  snapshots/<folder>/SNP_*.{fits,tiff,png} # v1.3：指定 folder 时
+  snapshots/<ts>.{fits,tiff,png}                       # folder 缺省/空（v1.4 命名）
+  snapshots/<folder>/<ts>.{fits,tiff,png}              # v1.3 相对名兼容 / snapshots 内绝对目录
+  <任意子目录>/<prefix>_<ts>.{fits,tiff,png}            # v1.4：data_root 内绝对 folder（prefix 非空时）
+  <任意子目录>/<ts>.{fits,tiff,png}                     # v1.4：无 prefix
   captures/<effective_session_name>/
     meta.json            # {id, name, created, phases[], camera{...}}；name 为 effective session name
     bias/  BIAS_0001.fits ...  + thumbs/BIAS_0001.png

@@ -1,4 +1,4 @@
-/** API 契约类型定义 — 与 docs/api.md v1.3 保持一致 */
+/** API 契约类型定义 — 与 docs/api.md v1.4 保持一致 */
 
 export type PhaseType = 'bias' | 'dark' | 'flat' | 'light';
 
@@ -67,6 +67,7 @@ export interface LiveState {
   quality?: number;
 }
 
+/** v1.3 遗留端点 GET /api/snapshot/folders 的子目录项（v1.4 前端不再使用） */
 export interface SnapshotFolder {
   /** 子目录名；根目录用空字符串表示 */
   name: string;
@@ -78,11 +79,30 @@ export interface SnapshotFoldersData {
   folders: SnapshotFolder[];
 }
 
-/** v1.3：folder 为实际保存位置（根目录时为空字符串） */
+/** GET /api/browse/folders 返回的单个直接子目录 */
+export interface BrowseFolderItem {
+  name: string;
+  /** 子目录绝对路径（用于作为下一次 browse 的 path 参数） */
+  path: string;
+}
+
+/** GET /api/browse/folders 返回数据：当前目录、上一级目录与直接子目录列表 */
+export interface BrowseFoldersData {
+  /** 当前目录绝对路径 */
+  path: string;
+  /** 上一级目录绝对路径；已在 data_root 顶层时为 null */
+  parent: string | null;
+  /** v1.4 恒为空数组（目录浏览器不列文件） */
+  files: string[];
+  folders: BrowseFolderItem[];
+}
+
+/** v1.4：folder 为实际保存目录的绝对路径；prefix 为后端 sanitize 后的前缀（可为空字符串） */
 export interface SnapshotResult {
   file: string;
   url: string;
   folder: string;
+  prefix: string;
 }
 
 export interface LiveStats {

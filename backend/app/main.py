@@ -13,7 +13,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from fastapi import (FastAPI, HTTPException, Request, WebSocket,
+from fastapi import (FastAPI, HTTPException, Query, Request, WebSocket,
                      WebSocketDisconnect)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +31,7 @@ from .sessions import get_session, list_sessions
 from .util import (CONTENT_TYPES, REPO_ROOT, auto_contrast_8bit, ensure_dirs,
                    frame_stats, get_captures_dir, get_data_root,
                    get_snapshots_dir, histogram_256,
-                   is_data_root_writable, ok, set_data_root)
+                   is_data_root_writable, ok, sanitize_prefix, set_data_root)
 
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 INDEX_HTML = DIST_DIR / "index.html"
@@ -307,6 +307,7 @@ class LiveStartBody(BaseModel):
 class SnapshotBody(BaseModel):
     format: str = "fits"
     folder: str | None = None
+    prefix: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -469,20 +470,44 @@ async def ws_live(websocket: WebSocket):
         live_manager.disconnect(websocket)
 
 
-# v1.3：snapshot folder 只允许单段相对子目录名。
+# v1.4：目录浏览（抓拍文件夹选择）。
+@app.get("/api/browse/folders")
+def browse_folders(path: str | None = Query(default=None)):
+    """列出 data_root 内某个目录的直接子目录（不含文件）。
+
+    path 缺省/空 → data_root；否则必须是已存在的绝对目录，且 resolve 后
+    == data_root 或位于其内部。任何不满足（相对路径、不存在、越界）都返回
+    400 "Folder must be inside the data root"。
+    """
+    root = get_data_root().resolve()
+    raw = (path or "").strip()
+    if not raw:
+        current = root
+    else:
+        current = Path(raw).resolve() if Path(raw).is_absolute() else None
+        if current is None or not current.is_dir() \
+                or (current != root and root not in current.parents):
+            raise HTTPException(400, "Folder must be inside the data root")
+    folders: list[dict[str, str]] = []
+    if current.is_dir():
+        folders = [{"name": p.name, "path": str(p)}
+                   for p in sorted(current.iterdir(), key=lambda p: p.name)
+                   if p.is_dir()]
+    parent = None if current == root else str(current.parent)
+    return ok({"path": str(current), "parent": parent, "files": [],
+               "folders": folders})
+
+
+# v1.3：snapshot folder 单段相对名校验（相对兼容路径仍限制非法字符）。
 _ILLEGAL_SNAPSHOT_FOLDER_CHARS = frozenset('<>:"|?*')
 
 
 def _snapshot_folder_name(folder: str | None) -> str:
-    """校验并规范化快照子目录名；空值返回 ""（存根目录）。"""
+    """v1.3 兼容：校验单段相对子目录名；空值返回 ""（存 snapshots 根目录）。"""
     raw = (folder or "").strip()
     if not raw:
         return ""
-    if raw.startswith("/") or raw.startswith("\\"):
-        raise HTTPException(400, "folder must be a relative subdirectory name (absolute paths are not allowed)")
-    if "/" in raw or "\\" in raw:
-        raise HTTPException(400, "folder must not contain path separators")
-    if raw == ".." or raw == ".":
+    if raw in (".", ".."):
         raise HTTPException(400, "folder must not contain . or .. segments")
     bad = sorted(ch for ch in set(raw) if ch in _ILLEGAL_SNAPSHOT_FOLDER_CHARS)
     if bad:
@@ -490,12 +515,37 @@ def _snapshot_folder_name(folder: str | None) -> str:
     return raw
 
 
+def _snapshot_folder(folder: str | None) -> Path:
+    """v1.4：解析快照目标目录（绝对路径）。
+
+    - 缺省/空 → data_root/snapshots（兼容旧行为）
+    - 单段相对名（如 "测试文件夹"）→ data_root/snapshots/<name>（兼容旧调用）
+    - 绝对路径：resolve 后必须 == data_root 或位于其内部，否则 400；
+      目录不存在时由调用方 mkdir(parents=True)。
+    """
+    root = get_data_root().resolve()
+    raw = (folder or "").strip()
+    if not raw:
+        return get_snapshots_dir().resolve()
+    if "/" in raw or "\\" in raw:
+        if not Path(raw).is_absolute():
+            raise HTTPException(
+                400, "folder must be an absolute path inside the data root "
+                     "or a single-segment relative name")
+        resolved = Path(raw).resolve()
+        if resolved != root and root not in resolved.parents:
+            raise HTTPException(400, "Folder must be inside the data root")
+        return resolved
+    return (get_snapshots_dir() / _snapshot_folder_name(raw)).resolve()
+
+
 @app.post("/api/snapshot")
 def snapshot(body: SnapshotBody):
     fmt = body.format
     if fmt not in ("fits", "tiff", "png"):
         raise HTTPException(400, "format only supports fits|tiff|png")
-    folder = _snapshot_folder_name(body.folder)
+    folder = _snapshot_folder(body.folder)
+    prefix = sanitize_prefix(body.prefix)
     try:
         frame = camera_service.grab_frame()
         cam = camera_service.device
@@ -510,12 +560,11 @@ def snapshot(body: SnapshotBody):
     except Exception as exc:  # noqa: BLE001
         raise_cam_err(exc)
     try:
-        if folder:
-            try:
-                (get_snapshots_dir() / folder).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise HTTPException(400, f"Failed to create snapshot folder: {exc}")
-        return ok(save_snapshot(frame, fmt, cam_info, props, folder))
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(400, f"Failed to create snapshot folder: {exc}")
+        return ok(save_snapshot(frame, fmt, cam_info, props, folder, prefix))
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -609,17 +658,27 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
             or any(part == ".." for part in rel_path.split("/")):
         raise HTTPException(400, "Invalid path")
     if session_id == "snapshots":
-        # v1.3：允许根目录文件与 <folder>/<file> 单级子目录文件。
-        base = get_snapshots_dir()
+        # v1.3 兼容：<file>（snapshots 根目录）与 <folder>/<file> 映射到
+        # <data_root>/snapshots/；v1.4：POST /api/snapshot 的目标 folder 可为
+        # data_root 内任意目录，URL 为 <rel-to-data_root>/<file>，故同时支持
+        # 按 data_root 解析。两个候选都必须在对应根目录内（穿越防护）；
+        # 优先返回已存在的旧口径候选，保证旧 URL 行为不变。
         parts = rel_path.split("/")
-        if len(parts) > 2 or any(not p for p in parts):
+        if any(not p for p in parts):
             raise HTTPException(400, "Invalid path")
-        path = base / rel_path
-        resolved = path.resolve()
-        if resolved.parent != base.resolve() \
-                and base.resolve() not in resolved.parents:
+        snapshots_base = get_snapshots_dir().resolve()
+        data_base = get_data_root().resolve()
+        candidates: list[Path] = []
+        legacy = (snapshots_base / rel_path).resolve()
+        if legacy == snapshots_base or snapshots_base in legacy.parents:
+            candidates.append(legacy)
+        current = (data_base / rel_path).resolve()
+        if current == data_base or data_base in current.parents:
+            candidates.append(current)
+        if not candidates:
             raise HTTPException(400, "Invalid path")
-        return path
+        existing = [p for p in candidates if p.is_file()]
+        return existing[0] if existing else candidates[0]
     captures_dir = get_captures_dir()
     parts = rel_path.split("/")
     groups = {"bias", "dark", "flat", "light", "masters", "calibrated"}

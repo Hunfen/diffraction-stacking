@@ -251,11 +251,18 @@ def step_settings():
     check(snap.get("ok") and snap["data"]["url"].startswith("/api/files/snapshots/"),
           "snapshot succeeds after switching data dir")
     if snap.get("ok"):
-        new_file = tmp_root / "snapshots" / snap["data"]["file"]
+        snap_data = snap["data"]
+        new_file = tmp_root / "snapshots" / snap_data["file"]
         check(new_file.is_file(), "snapshot lands in new data dir snapshots/")
-        check(not (default_root / "snapshots" / snap["data"]["file"]).exists(),
+        check(snap_data.get("folder") == str((tmp_root / "snapshots").resolve()),
+              "v1.4 default folder returns absolute snapshots dir")
+        check(snap_data.get("prefix") == "", "v1.4 default prefix is empty string")
+        check(bool(re.fullmatch(r"^\d{8}T\d{2}-\d{2}-\d{2}\.fits$",
+                                snap_data.get("file", ""))),
+              "v1.4 snapshot filename without prefix is <timestamp>.fits")
+        check(not (default_root / "snapshots" / snap_data["file"]).exists(),
               "default data dir does not get this snapshot")
-        status, body, headers = raw_response(snap["data"]["url"])
+        status, body, headers = raw_response(snap_data["url"])
         check(status == 200 and headers.get("cache-control") == "no-store",
               "snapshot file response has Cache-Control: no-store")
 
@@ -264,6 +271,74 @@ def step_settings():
           and r3["data"]["data_root"] == str(default_root),
           "PUT /api/settings restores default data dir")
     shutil.rmtree(tmp_base, ignore_errors=True)
+
+
+def step_browse_folders():
+    """v1.4: GET /api/browse/folders — 目录浏览（默认 data_root、子目录与 parent、越界 400）。"""
+    root = (REPO / "data").resolve()
+    browse_root = root / "smoke_browse"
+    shutil.rmtree(browse_root, ignore_errors=True)
+    browse_root.mkdir(parents=True, exist_ok=True)
+    for name in ("b", "a", "c"):
+        (browse_root / name).mkdir(exist_ok=True)
+    (browse_root / "a" / "deep").mkdir(exist_ok=True)
+    (browse_root / "not_a_dir.txt").write_text("x", encoding="utf-8")
+
+    status, payload = http_req("GET", "/api/browse/folders")
+    data = payload.get("data") if payload.get("ok") else {}
+    check(status == 200 and payload.get("ok"), "browse without path returns ok")
+    check(data.get("path") == str(root), "browse default path == data_root")
+    check(data.get("parent") is None, "browse default parent is null (data_root top level)")
+    check(data.get("files") == [], "browse default files is empty array")
+    names = [f.get("name") for f in data.get("folders", [])]
+    check(isinstance(data.get("folders"), list) and names == sorted(names),
+          "browse default folders is a list sorted by name")
+    check("smoke_browse" in names, "browse default lists direct subdir smoke_browse")
+
+    status, payload = http_req("GET", "/api/browse/folders?path="
+                               + quote(str(browse_root), safe=""))
+    data = payload.get("data") if payload.get("ok") else {}
+    check(status == 200 and payload.get("ok") and data.get("path") == str(browse_root),
+          "browse path=<absolute subdir> returns resolved path")
+    check(data.get("parent") == str(root), "browse subdir parent == data_root")
+    check(data.get("files") == [], "browse subdir files is empty array")
+    sub_names = [f.get("name") for f in data.get("folders", [])]
+    check(sub_names == ["a", "b", "c"],
+          "browse lists only direct subdirs sorted by name")
+    check(all(f.get("path") == str(browse_root / f.get("name"))
+              for f in data.get("folders", [])),
+          "browse folder entries carry absolute path")
+    check("not_a_dir.txt" not in sub_names, "browse does not list files")
+    check("deep" not in sub_names, "browse does not list nested subdirs")
+
+    status, payload = http_req("GET", "/api/browse/folders?path="
+                               + quote(str(browse_root / "a"), safe=""))
+    data = payload.get("data") if payload.get("ok") else {}
+    check(status == 200 and data.get("parent") == str(browse_root),
+          "browse nested dir parent == its parent dir")
+    deep_names = [f.get("name") for f in data.get("folders", [])]
+    check(deep_names == ["deep"], "browse nested dir lists its direct subdir")
+
+    for bad_path in (str(REPO), "/tmp"):
+        status, r = http_req("GET", "/api/browse/folders?path="
+                             + quote(bad_path, safe=""), expect=400)
+        check(status == 400 and not r.get("ok")
+              and (r or {}).get("error") == "Folder must be inside the data root",
+              f"browse path outside data_root {bad_path!r} -> 400 English error")
+
+    status, r = http_req("GET", "/api/browse/folders?path=relative/path",
+                         expect=400)
+    check(status == 400 and not r.get("ok")
+          and (r or {}).get("error") == "Folder must be inside the data root",
+          "browse relative path -> 400 English error")
+
+    status, r = http_req("GET", "/api/browse/folders?path="
+                         + quote(str(root / "no_such_dir"), safe=""), expect=400)
+    check(status == 400 and not r.get("ok")
+          and (r or {}).get("error") == "Folder must be inside the data root",
+          "browse nonexistent path -> 400 English error")
+
+    shutil.rmtree(browse_root, ignore_errors=True)
 
 
 def step_chinese_session():
@@ -389,15 +464,20 @@ def step_live_snapshot():
 
 
 def step_snapshot_folders():
-    """v1.3: snapshot subfolders (folder validation, creation, folders list, download)."""
-    snap_root = REPO / "data" / "snapshots"
+    """v1.4: 绝对 folder + prefix + 文件名恒带时间戳；保留 v1.3 相对单段名与 folders 接口。"""
+    snap_root = (REPO / "data" / "snapshots").resolve()
+    data_root = (REPO / "data").resolve()
+    ts_fits_re = r"^\d{8}T\d{2}-\d{2}-\d{2}\.fits$"
 
     status, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
     data = snap.get("data") if snap.get("ok") else {}
     check(status == 200 and snap.get("ok"), "default folder: POST /api/snapshot succeeds")
-    check(data.get("folder") == ""
+    check(data.get("folder") == str(snap_root)
           and data.get("url") == f"/api/files/snapshots/{data.get('file')}",
-          "default folder -> root dir (folder='', url has no subfolder segment)")
+          "default folder -> snapshots root (absolute folder, url has no subfolder segment)")
+    check(data.get("prefix") == "", "default snapshot prefix is empty")
+    check(bool(re.fullmatch(ts_fits_re, data.get("file", ""))),
+          "default snapshot filename is <timestamp>.fits (v1.4)")
     if data.get("file"):
         check((snap_root / data["file"]).is_file(),
               "default-folder snapshot lands in data/snapshots/ root")
@@ -405,17 +485,24 @@ def step_snapshot_folders():
     status, snap_blank = http_req("POST", "/api/snapshot",
                                   {"format": "png", "folder": "   "})
     blank = snap_blank.get("data") if snap_blank.get("ok") else {}
-    check(status == 200 and snap_blank.get("ok") and blank.get("folder") == "",
-          "blank folder -> root dir")
+    check(status == 200 and snap_blank.get("ok")
+          and blank.get("folder") == str(snap_root),
+          "blank folder -> snapshots root (absolute folder)")
+    check(bool(re.fullmatch(r"^\d{8}T\d{2}-\d{2}-\d{2}\.png$",
+                            blank.get("file", ""))),
+          "blank-folder png filename is <timestamp>.png (v1.4)")
 
     folder_name = "测试文件夹"
     status, snap_sub = http_req("POST", "/api/snapshot",
                                 {"format": "fits", "folder": folder_name})
     sub = snap_sub.get("data") if snap_sub.get("ok") else {}
     check(status == 200 and snap_sub.get("ok"), f"folder='{folder_name}': POST /api/snapshot succeeds")
-    check(sub.get("folder") == folder_name, "response echoes folder field")
+    check(sub.get("folder") == str(snap_root / folder_name),
+          "relative single-segment folder maps to data_root/snapshots/<name> (absolute response)")
     check(sub.get("url") == f"/api/files/snapshots/{folder_name}/{sub.get('file')}",
           "url is /api/files/snapshots/<folder>/<file>")
+    check(bool(re.fullmatch(ts_fits_re, sub.get("file", ""))),
+          "relative-folder snapshot filename is <timestamp>.fits (v1.4)")
     check(bool(sub.get("file"))
           and (snap_root / folder_name / sub["file"]).is_file(),
           "snapshot file is created inside the subfolder")
@@ -450,6 +537,87 @@ def step_snapshot_folders():
         status, _ = raw_request(quote(
             f"/api/files/snapshots/{folder_name}/../{sub['file']}", safe="/"))
         check(status == 400, "snapshot subfolder traversal (<folder>/../<file>) -> 400")
+
+    # v1.4：data_root 下自选绝对目录（不存在时自动 mkdir parents）+ prefix="spot"。
+    abs_dir = data_root / "v14_smoke_abs" / "nested"
+    shutil.rmtree(data_root / "v14_smoke_abs", ignore_errors=True)
+    status, snap_abs = http_req("POST", "/api/snapshot",
+                                {"format": "fits", "folder": str(abs_dir),
+                                 "prefix": "spot"})
+    abs_data = snap_abs.get("data") if snap_abs.get("ok") else {}
+    check(status == 200 and snap_abs.get("ok") and abs_dir.is_dir(),
+          "absolute folder under data_root auto-created with parents")
+    check(abs_data.get("folder") == str(abs_dir),
+          "absolute folder echoed as absolute path")
+    check(abs_data.get("prefix") == "spot", "prefix echoed back")
+    check(bool(re.fullmatch(r"^spot_\d{8}T\d{2}-\d{2}-\d{2}\.fits$",
+                            abs_data.get("file", ""))),
+          "prefix='spot' filename is spot_<timestamp>.fits")
+    check(abs_data.get("url") == f"/api/files/snapshots/v14_smoke_abs/nested/{abs_data.get('file')}",
+          "absolute-folder url is /api/files/snapshots/<rel-to-data_root>/<file>")
+    if abs_data.get("file"):
+        check((abs_dir / abs_data["file"]).is_file(),
+              "absolute-folder snapshot file exists on disk")
+        status, body, headers = raw_response(quote(abs_data["url"], safe="/"))
+        check(status == 200 and body[:6] == b"SIMPLE",
+              "absolute-folder snapshot url downloads (FITS)")
+        check(headers.get("cache-control") == "no-store",
+              "absolute-folder snapshot download keeps Cache-Control: no-store")
+
+    status, snap_abs2 = http_req("POST", "/api/snapshot",
+                                 {"format": "fits", "folder": str(abs_dir)})
+    abs2 = snap_abs2.get("data") if snap_abs2.get("ok") else {}
+    check(status == 200 and snap_abs2.get("ok")
+          and abs2.get("prefix") == ""
+          and bool(re.fullmatch(ts_fits_re, abs2.get("file", ""))),
+          "absolute folder without prefix -> <timestamp>.fits and prefix=''")
+    if abs2.get("file"):
+        check((abs_dir / abs2["file"]).is_file(),
+              "absolute-folder snapshot without prefix exists on disk")
+
+    raw_prefix = 'spot/<x>:"a b?*|c\\d '
+    expected_prefix = re.sub(r'[<>:"/\\|?*\s]', "_", raw_prefix)
+    status, snap_pfx = http_req("POST", "/api/snapshot",
+                                {"format": "fits", "folder": str(abs_dir),
+                                 "prefix": raw_prefix})
+    pfx = snap_pfx.get("data") if snap_pfx.get("ok") else {}
+    check(status == 200 and snap_pfx.get("ok"), "illegal prefix: POST /api/snapshot succeeds")
+    check(pfx.get("prefix") == expected_prefix,
+          f"prefix sanitized to {expected_prefix!r}")
+    check(not re.search(r'[<>:"/\\|?*\s]', pfx.get("prefix", "")),
+          "sanitized prefix has no separators/illegal chars/whitespace")
+    pfx_name_re = "^" + re.escape(expected_prefix) + r"_\d{8}T\d{2}-\d{2}-\d{2}\.fits$"
+    check(bool(re.fullmatch(pfx_name_re, pfx.get("file", ""))),
+          "sanitized prefix used in filename <prefix>_<timestamp>.fits")
+    if pfx.get("file"):
+        check((abs_dir / pfx["file"]).is_file(),
+              "sanitized-prefix snapshot exists on disk")
+
+    for bad_abs in (str(REPO), "/tmp"):
+        status, r = http_req("POST", "/api/snapshot",
+                             {"format": "fits", "folder": bad_abs}, expect=400)
+        check(status == 400 and not r.get("ok")
+              and (r or {}).get("error") == "Folder must be inside the data root",
+              f"absolute folder outside data_root {bad_abs!r} -> 400")
+
+    # v1.4：folder == data_root 允许（文件落在 data_root 根目录）。
+    status, snap_rootabs = http_req("POST", "/api/snapshot",
+                                    {"format": "fits", "folder": str(data_root)})
+    rootabs = snap_rootabs.get("data") if snap_rootabs.get("ok") else {}
+    check(status == 200 and snap_rootabs.get("ok")
+          and rootabs.get("folder") == str(data_root),
+          "folder == data_root is allowed")
+    if rootabs.get("file"):
+        check((data_root / rootabs["file"]).is_file(),
+              "folder == data_root snapshot lands in data_root root")
+        check(rootabs.get("url") == f"/api/files/snapshots/{rootabs['file']}",
+              "folder == data_root url has no subfolder segment")
+        status, body = raw_request(rootabs["url"])
+        check(status == 200 and body[:6] == b"SIMPLE",
+              "folder == data_root snapshot url downloads (FITS)")
+        (data_root / rootabs["file"]).unlink(missing_ok=True)
+
+    shutil.rmtree(data_root / "v14_smoke_abs", ignore_errors=True)
 
 
 def step_capture():
@@ -744,6 +912,7 @@ def main():
         step_health_devices()
         step_open_properties()
         step_settings()
+        step_browse_folders()
         step_chinese_session()
         step_live_snapshot()
         step_snapshot_folders()

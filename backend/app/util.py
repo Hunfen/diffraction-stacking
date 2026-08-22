@@ -25,6 +25,9 @@ FITS_HEADER_SATPCT = "SATPCT"
 # session 名称清洗：路径分隔符 + Windows 非法字符 + 空白 → "_"
 _ILLEGAL_SESSION_CHARS = re.compile(r'[<>:"/\\|?*\s]')
 
+# snapshot prefix 清洗（v1.4）：与 session 同口径，但允许结果为空
+_ILLEGAL_PREFIX_CHARS = re.compile(r'[<>:"/\\|?*\s]')
+
 
 def ok(data):
     """统一成功响应包裹。"""
@@ -50,6 +53,15 @@ def sanitize_session_name(name: str) -> str:
         return "session"
     cleaned = _ILLEGAL_SESSION_CHARS.sub("_", raw)
     return cleaned
+
+
+def sanitize_prefix(prefix: str | None) -> str:
+    """v1.4：清洗快照文件名 prefix。
+
+    路径分隔符、Windows 非法字符 `< > : " | ? *` 与空白统一替换为 `_`；
+    缺省/空输入返回 ""（允许为空）。非 ASCII 字符（如中文）保留。
+    """
+    return _ILLEGAL_PREFIX_CHARS.sub("_", prefix or "")
 
 
 def ascii_fits_value(value: str) -> str:

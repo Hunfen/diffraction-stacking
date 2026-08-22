@@ -21,8 +21,9 @@ from PIL import Image
 from .camera import CameraService
 from .util import (FITS_HEADER_MEAN, FITS_HEADER_STD,
                    FITS_HEADER_SATPCT, ascii_fits_value, auto_contrast_8bit,
-                   frame_stats, get_captures_dir, get_snapshots_dir, now_iso,
-                   now_stamp, sanitize_session_name)
+                   frame_stats, get_captures_dir, get_data_root,
+                   get_snapshots_dir, now_iso, now_stamp,
+                   sanitize_session_name)
 
 PHASE_TYPES = ("bias", "dark", "flat", "light")
 ACTIVE_STATUSES = {"running", "waiting_user", "capturing"}
@@ -399,19 +400,26 @@ class CaptureService:
 
 
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
-                  props: dict | None = None, folder: str = "") -> dict:
-    """单帧快照 → <data_root>/snapshots/（v1.3：folder 非空存子目录）。
+                  props: dict | None = None, folder: str | Path = "",
+                  prefix: str = "") -> dict:
+    """v1.4：单帧快照，文件名恒带时间戳。
 
-    FITS 头补齐契约关键字；folder 必须已通过路径校验（仅单段相对目录名）。
+    folder 为已解析的绝对目录（调用方保证位于 data_root 内）；
+    prefix 已按 v1.4 口径 sanitize。文件名：
+      有 prefix → <prefix>_<YYYYMMDDTHH-MM-SS>.<ext>
+      无 prefix → <YYYYMMDDTHH-MM-SS>.<ext>
     """
-    base = get_snapshots_dir()
-    snap_dir = base / folder if folder else base
+    base = get_snapshots_dir().resolve()
+    root = get_data_root().resolve()
+    snap_dir = Path(folder).resolve() if folder else base
     snap_dir.mkdir(parents=True, exist_ok=True)
     ts = now_stamp()
+    prefix = prefix or ""
     cam = cam or {}
     props = props or {}
     if fmt == "fits":
-        name = f"SNP_{ts}.fits"
+        ext = "fits"
+        name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
         hdu = fits.PrimaryHDU(np.asarray(frame, dtype=np.uint16))
         hdu.header["DATE-OBS"] = datetime.now().isoformat(timespec="milliseconds")
         hdu.header["EXPOSURE"] = float(props.get("exposure", 0.0))
@@ -425,17 +433,27 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
         hdu.header["NFRAME"] = 1
         hdu.writeto(snap_dir / name, overwrite=True)
     elif fmt == "tiff":
-        name = f"SNP_{ts}.tiff"
+        ext = "tiff"
+        name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
         Image.fromarray(np.asarray(frame, dtype=np.uint16), mode="I;16").save(
             snap_dir / name)
     elif fmt == "png":
-        name = f"SNP_{ts}.png"
+        ext = "png"
+        name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
         Image.fromarray(auto_contrast_8bit(frame), mode="L").save(
             snap_dir / name)
     else:
         raise RuntimeError(f"Unsupported snapshot format: {fmt} (only fits|tiff|png)")
-    if folder:
-        url = f"/api/files/snapshots/{folder}/{name}"
-    else:
-        url = f"/api/files/snapshots/{name}"
-    return {"file": name, "url": url, "folder": folder}
+
+    # URL：旧口径（snapshots 目录内）保持 /api/files/snapshots/<rel>/<file>；
+    # v1.4 新口径（data_root 内任意目录）用 /api/files/snapshots/<rel-to-root>/<file>。
+    try:
+        rel = str(snap_dir.relative_to(base))
+    except ValueError:
+        rel = str(snap_dir.relative_to(root))
+    if rel == ".":
+        rel = ""
+    url = f"/api/files/snapshots/{rel}/{name}" if rel \
+        else f"/api/files/snapshots/{name}"
+    return {"file": name, "url": url, "folder": str(snap_dir),
+            "prefix": prefix}

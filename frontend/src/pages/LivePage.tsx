@@ -16,38 +16,66 @@ import {
   Empty,
   Input,
   InputNumber,
+  Modal,
   Row,
   Select,
   Slider,
   Space,
+  Spin,
   Statistic,
   Switch,
   Tag,
   Typography,
   message,
 } from 'antd';
-import { CameraOutlined, LinkOutlined, ReloadOutlined } from '@ant-design/icons';
+import {
+  ArrowUpOutlined,
+  CameraOutlined,
+  FolderOpenOutlined,
+  FolderOutlined,
+  LinkOutlined,
+} from '@ant-design/icons';
+import { AxiosError } from 'axios';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { apiGet, apiPost, apiPut } from '../api/client';
 import { resolveUrl } from '../api/backend';
 import { getPreviewSettings } from '../api/settings';
 import { useReconnectingWebSocket, type WsStatus } from '../api/ws';
 import type {
+  BrowseFoldersData,
   CameraProperty,
+  DataDirSettings,
   LiveStats,
   PropertiesData,
   PropertyPutResult,
-  SnapshotFolder,
-  SnapshotFoldersData,
   SnapshotResult,
 } from '../api/types';
 
 const WS_LIVE = '/ws/live';
 const SNAPSHOT_FOLDER_KEY = 'ds.snapshot.folder';
-const NEW_FOLDER_VALUE = '__new__';
+const SNAPSHOT_PREFIX_KEY = 'ds.snapshot.prefix';
 /** 统计饱和比例告警阈值（%）。超过后视为警告，用于顶部提示自动复显。 */
 const SATURATION_WARN_THRESHOLD_PCT = 1.0;
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
+
+/** data_root → 默认快照目录 <data_root>/snapshots。 */
+function defaultSnapshotFolder(dataRoot: string): string {
+  return `${dataRoot.replace(/\/+$/, '')}/snapshots`;
+}
+
+/** 从 api client 的两种错误形态提取后端英文错误文本：
+ *  - ApiError（ok:false 信封）：message 即后端 error；
+ *  - AxiosError（FastAPI HTTPException 的 {"detail": ...}）：读取 detail。
+ */
+function browseErrorMessage(err: unknown): string {
+  if (err instanceof AxiosError) {
+    const body = err.response?.data as { error?: unknown; detail?: unknown } | undefined;
+    if (typeof body?.error === 'string' && body.error) return body.error;
+    if (typeof body?.detail === 'string' && body.detail) return body.detail;
+    if (body?.detail) return JSON.stringify(body.detail);
+  }
+  return err instanceof Error && err.message ? err.message : 'Failed to load folders.';
+}
 
 const statusMeta: Record<WsStatus, { color: string; text: string }> = {
   idle: { color: 'default', text: 'Not Started' },
@@ -422,12 +450,19 @@ export default function LivePage() {
   const [snapshotFormat, setSnapshotFormat] = useState<'fits' | 'tiff' | 'png'>('fits');
   const [snapshot, setSnapshot] = useState<SnapshotResult | null>(null);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [snapshotFolders, setSnapshotFolders] = useState<SnapshotFolder[]>([]);
-  // '' = 根目录；__new__ = 新建文件夹模式；其余为已有子文件夹名。localStorage 记住上次选择。
-  const [snapshotFolder, setSnapshotFolder] = useState<string>(
-    () => localStorage.getItem(SNAPSHOT_FOLDER_KEY) ?? '',
+  // 已选快照目录（绝对路径）。localStorage 记住上次选择；无记忆（null/空串）时用 /api/settings 的 data_root + /snapshots。
+  const [snapshotFolder, setSnapshotFolder] = useState<string | null>(
+    () => localStorage.getItem(SNAPSHOT_FOLDER_KEY) || null,
   );
-  const [newFolderName, setNewFolderName] = useState('');
+  // 文件名前缀（可为空）。localStorage 记住上次输入。
+  const [snapshotPrefix, setSnapshotPrefix] = useState<string>(
+    () => localStorage.getItem(SNAPSHOT_PREFIX_KEY) ?? '',
+  );
+  // v1.4 目录选择器（/api/browse/folders）
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [browseFolders, setBrowseFolders] = useState<BrowseFoldersData | null>(null);
+  const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState<string | null>(null);
 
   // 顶部提示：内存态 dismissed；出现任何警告时自动复显
   const [alertDismissed, setAlertDismissed] = useState(false);
@@ -567,69 +602,79 @@ export default function LivePage() {
     };
   }, [preview]);
 
-  // 快照子文件夹列表（v1.3）：加载失败保持已有列表，避免后端并行开发期间清空
-  const loadSnapshotFolders = useCallback(async () => {
-    try {
-      const data = await apiGet<SnapshotFoldersData>('/api/snapshot/folders', { silent: true });
-      setSnapshotFolders(Array.isArray(data.folders) ? data.folders : []);
-    } catch {
-      /* 保持已有列表 */
-    }
-  }, []);
-
+  // v1.4 默认快照目录：优先 localStorage；无记忆时 GET /api/settings 取 data_root + /snapshots。
   useEffect(() => {
-    // 初始加载内联成 promise 链（与 useProperties 同口径），不在 effect 里直接调用会 setState 的刷新函数
+    if (localStorage.getItem(SNAPSHOT_FOLDER_KEY)) return;
     let cancelled = false;
-    apiGet<SnapshotFoldersData>('/api/snapshot/folders', { silent: true })
+    apiGet<DataDirSettings>('/api/settings', { silent: true })
       .then((data) => {
-        if (!cancelled) setSnapshotFolders(Array.isArray(data.folders) ? data.folders : []);
+        if (!cancelled) setSnapshotFolder(defaultSnapshotFolder(data.data_root));
       })
-      .catch(() => undefined);
+      .catch(() => {
+        // 后端不可用/加载失败：保持空值，POST /api/snapshot 缺省 folder 时后端会落到 data_root/snapshots
+        if (!cancelled) setSnapshotFolder('');
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const snapshotFolderOptions = useMemo(() => {
-    // 契约 v1.3：folders 会用 name="" 表达根目录（files=根目录文件数），去重合并为静态根目录项
-    const root = snapshotFolders.find((f) => f.name === '');
-    const options = [
-      { value: '', label: root ? `Root folder (${root.files} files)` : 'Root folder' },
-      { value: NEW_FOLDER_VALUE, label: 'New folder…' },
-      ...snapshotFolders
-        .filter((f) => f.name !== '')
-        .map((f) => ({
-          value: f.name,
-          label: `${f.name} (${f.files} files)`,
-        })),
-    ];
-    // localStorage 记住的文件夹若已不存在，也保留为可选项，避免 Select 显示裸值
-    if (
-      snapshotFolder
-      && snapshotFolder !== NEW_FOLDER_VALUE
-      && !snapshotFolders.some((f) => f.name === snapshotFolder)
-    ) {
-      options.push({ value: snapshotFolder, label: snapshotFolder });
+  /** GET /api/browse/folders：无 path → data_root；带 path → 进入该目录。错误就地展示，不弹全局 toast。 */
+  const fetchBrowseFolders = useCallback(async (path?: string) => {
+    setBrowseLoading(true);
+    setBrowseError(null);
+    try {
+      const query = path ? `?path=${encodeURIComponent(path)}` : '';
+      const data = await apiGet<BrowseFoldersData>(`/api/browse/folders${query}`, { silent: true });
+      setBrowseFolders({
+        path: data.path,
+        parent: data.parent ?? null,
+        files: Array.isArray(data.files) ? data.files : [],
+        folders: Array.isArray(data.folders) ? data.folders : [],
+      });
+    } catch (err) {
+      setBrowseError(browseErrorMessage(err));
+    } finally {
+      setBrowseLoading(false);
     }
-    return options;
-  }, [snapshotFolders, snapshotFolder]);
+  }, []);
+
+  const openFolderPicker = () => {
+    setBrowseFolders(null);
+    setFolderPickerOpen(true);
+    void fetchBrowseFolders();
+  };
+
+  const closeFolderPicker = () => setFolderPickerOpen(false);
+
+  const useCurrentFolder = () => {
+    if (!browseFolders) return;
+    setSnapshotFolder(browseFolders.path);
+    localStorage.setItem(SNAPSHOT_FOLDER_KEY, browseFolders.path);
+    closeFolderPicker();
+  };
+
+  const browseUp = () => {
+    if (!browseFolders?.parent) return;
+    void fetchBrowseFolders(browseFolders.parent);
+  };
 
   const takeSnapshot = async () => {
-    if (snapshotFolder === NEW_FOLDER_VALUE && !newFolderName.trim()) {
-      message.error('Please enter a new folder name');
-      return;
-    }
-    const folder = snapshotFolder === NEW_FOLDER_VALUE ? newFolderName.trim() : snapshotFolder;
     setSnapshotBusy(true);
     try {
-      const result = await apiPost<SnapshotResult>('/api/snapshot', { format: snapshotFormat, folder });
+      const result = await apiPost<SnapshotResult>('/api/snapshot', {
+        format: snapshotFormat,
+        folder: snapshotFolder || '',
+        prefix: snapshotPrefix,
+      });
       setSnapshot(result);
-      // v1.3 后端返回 {file,url,folder}；旧后端缺省 folder 时按提交值记忆
-      const savedFolder = typeof result.folder === 'string' ? result.folder : folder;
+      // v1.4 返回 folder 为绝对路径、prefix 为 sanitize 后的值；两者都写入 localStorage
+      const savedFolder = typeof result.folder === 'string' ? result.folder : snapshotFolder || '';
+      const savedPrefix = typeof result.prefix === 'string' ? result.prefix : snapshotPrefix;
       setSnapshotFolder(savedFolder);
       localStorage.setItem(SNAPSHOT_FOLDER_KEY, savedFolder);
-      setNewFolderName('');
-      void loadSnapshotFolders();
+      setSnapshotPrefix(savedPrefix);
+      localStorage.setItem(SNAPSHOT_PREFIX_KEY, savedPrefix);
     } finally {
       setSnapshotBusy(false);
     }
@@ -874,35 +919,36 @@ export default function LivePage() {
 
             <Card size="small" title="Snapshot (Single Frame)">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                <Space wrap>
-                  <Select
-                    value={snapshotFolder}
-                    onChange={(value) => {
-                      setSnapshotFolder(value);
-                      if (value !== NEW_FOLDER_VALUE) {
-                        localStorage.setItem(SNAPSHOT_FOLDER_KEY, value);
-                      }
-                    }}
-                    options={snapshotFolderOptions}
-                    style={{ width: 220 }}
-                  />
-                  <Button
-                    type="text"
-                    icon={<ReloadOutlined />}
-                    aria-label="Refresh folder list"
-                    title="Refresh folder list"
-                    onClick={() => void loadSnapshotFolders()}
-                  />
-                </Space>
-                {snapshotFolder === NEW_FOLDER_VALUE && (
+                <div>
+                  <Button icon={<FolderOpenOutlined />} onClick={openFolderPicker}>
+                    Choose Folder…
+                  </Button>
+                  <div style={{ marginTop: 4 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                      {snapshotFolder === null
+                        ? 'Loading default folder…'
+                        : snapshotFolder || 'Default folder (data_root/snapshots)'}
+                    </Typography.Text>
+                  </div>
+                </div>
+                <div>
                   <Input
-                    value={newFolderName}
-                    onChange={(e) => setNewFolderName(e.target.value)}
-                    placeholder="Enter new folder name (created on snapshot)"
+                    value={snapshotPrefix}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setSnapshotPrefix(next);
+                      localStorage.setItem(SNAPSHOT_PREFIX_KEY, next);
+                    }}
+                    placeholder="Prefix (optional)"
                     allowClear
                     maxLength={128}
                   />
-                )}
+                  <div style={{ marginTop: 4 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      File name format: &lt;prefix&gt;_&lt;timestamp&gt;.ext (or &lt;timestamp&gt;.ext without a prefix)
+                    </Typography.Text>
+                  </div>
+                </div>
                 <Space wrap>
                   <Select
                     value={snapshotFormat}
@@ -927,7 +973,7 @@ export default function LivePage() {
                   <Descriptions size="small" column={1}>
                     <Descriptions.Item label="File Name">{snapshot.file}</Descriptions.Item>
                     <Descriptions.Item label="Folder">
-                      {snapshot.folder ? snapshot.folder : 'Root folder'}
+                      {snapshot.folder || '—'}
                     </Descriptions.Item>
                     <Descriptions.Item label="Download">
                       <a href={resolveUrl(snapshot.url)} target="_blank" rel="noreferrer">
@@ -937,7 +983,7 @@ export default function LivePage() {
                   </Descriptions>
                 )}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Snapshots are saved to data/snapshots/ (or the selected subfolder); the URL is returned by the backend.
+                  Snapshots are saved to the selected folder; file names always include a timestamp and the URL is returned by the backend.
                 </Typography.Text>
               </Space>
             </Card>
@@ -1015,6 +1061,63 @@ export default function LivePage() {
           </Card>
         </Col>
       </Row>
+
+      <Modal
+        title="Choose Snapshot Folder"
+        open={folderPickerOpen}
+        onCancel={closeFolderPicker}
+        width={520}
+        footer={[
+          <Button
+            key="up"
+            icon={<ArrowUpOutlined />}
+            disabled={!browseFolders?.parent || browseLoading}
+            onClick={browseUp}
+          >
+            Up
+          </Button>,
+          <Button key="cancel" onClick={closeFolderPicker}>
+            Cancel
+          </Button>,
+          <Button
+            key="use"
+            type="primary"
+            disabled={!browseFolders || browseLoading}
+            onClick={useCurrentFolder}
+          >
+            Use This Folder
+          </Button>,
+        ]}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Typography.Text code style={{ wordBreak: 'break-all' }}>
+            {browseFolders?.path ?? 'Loading…'}
+          </Typography.Text>
+          {browseError && <Alert type="error" showIcon message={browseError} />}
+          <Spin spinning={browseLoading}>
+            {browseFolders && browseFolders.folders.length === 0 ? (
+              <Empty description="No subfolders" />
+            ) : (
+              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  {(browseFolders?.folders ?? []).map((folder) => (
+                    <Button
+                      key={folder.path}
+                      type="text"
+                      block
+                      icon={<FolderOutlined />}
+                      style={{ textAlign: 'left' }}
+                      onClick={() => void fetchBrowseFolders(folder.path)}
+                    >
+                      {folder.name}
+                    </Button>
+                  ))}
+                </Space>
+              </div>
+            )}
+          </Spin>
+        </Space>
+      </Modal>
     </Space>
   );
 }
