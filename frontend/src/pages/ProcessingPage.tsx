@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -31,6 +31,7 @@ import type {
   ExcludeMap,
   FrameInfo,
   JobEventData,
+  JobSubmitResult,
   PhaseType,
   ProcessMethod,
   SessionDetail,
@@ -60,6 +61,16 @@ const JOB_STATUS_META: Record<JobEventData['status'], { color: string; text: str
   error: { color: 'error', text: '失败' },
 };
 
+/** 只轮询合法 job_id，避免 undefined 之类的幽灵 id 打 GET /api/process/jobs/undefined */
+const isValidJobId = (id: string): boolean => typeof id === 'string' && id.length > 0 && id !== 'undefined';
+
+/** POST /api/process/* 响应是 {job_id,...}，统一归一成 jobs 表使用的 JobEventData（字段名 id） */
+const toJobEvent = (submitted: JobSubmitResult): JobEventData => ({
+  id: submitted.job_id,
+  type: submitted.type,
+  status: submitted.status,
+});
+
 export default function ProcessingPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
@@ -86,6 +97,14 @@ export default function ProcessingPage() {
   const [white, setWhite] = useState(4095);
   const [stretchSubmitting, setStretchSubmitting] = useState(false);
   const [previewVersion, setPreviewVersion] = useState(0);
+
+  // Bug B 修复：轮询闭包一律通过 ref 读取最新值，轮询 effect 的依赖保持稳定，
+  // 不再依赖 activeJobIds / selectedId 等会抖动的派生值。
+  const selectedIdRef = useRef<string | undefined>(selectedId);
+  const activeJobIdsRef = useRef<string[]>([]);
+  // Bug A 修复：对 terminal job 事件按 `job.id|status` 去重，WS 与 1s 轮询重复送达时
+  // 只 reload 详情 / 自增预览版本一次，防止 previewVersion 被反复累加。
+  const processedTerminalEventsRef = useRef(new Set<string>());
 
   const loadSessions = useCallback(async () => {
     setSessionsLoading(true);
@@ -154,6 +173,46 @@ export default function ProcessingPage() {
     };
   }, [selectedId]);
 
+  // ref 与 state 同步：轮询回调始终读到最新的 selectedId / activeJobIds
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    activeJobIdsRef.current = Object.values(jobs)
+      .filter((j) => j.status === 'pending' || j.status === 'running')
+      .map((j) => j.id)
+      .filter(isValidJobId);
+  }, [jobs]);
+
+  /**
+   * WS /ws/events 与 1s 轮询共用同一个更新入口，保证两种来源合并进同一个 setJobs。
+   * 只依赖稳定的 loadDetail，闭包内全部读 ref，不随 selectedId/jobs 变化重建。
+   */
+  const handleJobUpdate = useCallback(
+    (job: JobEventData) => {
+      if (!isValidJobId(job.id)) return;
+      setJobs((prev) => ({ ...prev, [job.id]: job }));
+      if (job.status !== 'done' && job.status !== 'error') return;
+
+      const terminalKey = `${job.id}|${job.status}`;
+      if (processedTerminalEventsRef.current.has(terminalKey)) return;
+      processedTerminalEventsRef.current.add(terminalKey);
+
+      const selected = selectedIdRef.current;
+      if (selected) {
+        const reload = loadDetail(selected);
+        if (job.type === 'stretch' && job.status === 'done') {
+          // 完成后先重新加载详情，拿到最新结果列表后再自增 ?v= 刷新预览
+          void reload.then(() => setPreviewVersion((v) => v + 1));
+        }
+      } else if (job.type === 'stretch' && job.status === 'done') {
+        setPreviewVersion((v) => v + 1);
+      }
+    },
+    [loadDetail],
+  );
+
   const handleEvent = useCallback(
     (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
@@ -162,47 +221,32 @@ export default function ProcessingPage() {
         if (parsed.topic === 'capture' && parsed.data) {
           setCaptureState(parsed.data as CaptureState);
         } else if (parsed.topic === 'job' && parsed.data) {
-          const job = parsed.data as JobEventData;
-          setJobs((prev) => ({ ...prev, [job.id]: job }));
-          if (job.status === 'done' || job.status === 'error') {
-            if (selectedId) void loadDetail(selectedId);
-            if (job.type === 'stretch' && job.status === 'done') {
-              setPreviewVersion((v) => v + 1);
-            }
-          }
+          handleJobUpdate(parsed.data as JobEventData);
         }
       } catch {
         /* ignore */
       }
     },
-    [selectedId, loadDetail],
+    [handleJobUpdate],
   );
 
   useReconnectingWebSocket('/ws/events', { enabled: true, onMessage: handleEvent });
 
-  // 对仍处于 pending/running 的 job 做轮询兜底
-  const activeJobIds = Object.values(jobs)
-    .filter((j) => j.status === 'pending' || j.status === 'running')
-    .map((j) => j.id);
+  // 对仍处于 pending/running 的 job 每 1s 轮询兜底。
+  // effect 依赖只有稳定的 handleJobUpdate；每次 tick 从 activeJobIdsRef 读最新 id，
+  // job 变为 done/error 后 jobs 更新 → activeJobIdsRef 同步剔除 → 自然停止该 job 的轮询。
   useEffect(() => {
-    if (activeJobIds.length === 0) return;
     const timer = setInterval(() => {
-      activeJobIds.forEach((id) => {
+      const ids = activeJobIdsRef.current.filter(isValidJobId);
+      if (ids.length === 0) return;
+      ids.forEach((id) => {
         void apiGet<JobEventData>(`/api/process/jobs/${id}`, { silent: true })
-          .then((job) => {
-            setJobs((prev) => ({ ...prev, [job.id]: job }));
-            if ((job.status === 'done' || job.status === 'error') && selectedId) {
-              void loadDetail(selectedId);
-            }
-            if (job.type === 'stretch' && job.status === 'done') {
-              setPreviewVersion((v) => v + 1);
-            }
-          })
+          .then((job) => handleJobUpdate(job))
           .catch(() => undefined);
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [activeJobIds.join(','), selectedId, loadDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [handleJobUpdate]);
 
   const frameKey = (type: PhaseType, file: string) => `${type}|${file}`;
 
@@ -240,14 +284,16 @@ export default function ProcessingPage() {
     }
     setCalSubmitting(true);
     try {
-      const job = await apiPost<JobEventData>('/api/process/calibrate', {
+      const job = await apiPost<JobSubmitResult>('/api/process/calibrate', {
         session_id: selectedId,
         sigma: calSigma,
         method: calMethod,
         exclude: buildExclude(),
       });
-      setJobs((prev) => ({ ...prev, [job.id]: job }));
-      message.success(`已提交标定任务 ${job.id}（exclude 共 ${excludedCountTotal} 帧）`);
+      // 提交响应字段是 job_id，立即归一成 JobEventData 写入 jobs，避免幽灵 pending 行
+      const event = toJobEvent(job);
+      setJobs((prev) => ({ ...prev, [event.id]: event }));
+      message.success(`已提交标定任务 ${job.job_id}（exclude 共 ${excludedCountTotal} 帧）`);
     } finally {
       setCalSubmitting(false);
     }
@@ -260,15 +306,16 @@ export default function ProcessingPage() {
     }
     setStackSubmitting(true);
     try {
-      const job = await apiPost<JobEventData>('/api/process/stack', {
+      const job = await apiPost<JobSubmitResult>('/api/process/stack', {
         session_id: selectedId,
         sigma: stackSigma,
         method: stackMethod,
         registration,
         exclude: buildExclude(),
       });
-      setJobs((prev) => ({ ...prev, [job.id]: job }));
-      message.success(`已提交叠加任务 ${job.id}（exclude 共 ${excludedCountTotal} 帧）`);
+      const event = toJobEvent(job);
+      setJobs((prev) => ({ ...prev, [event.id]: event }));
+      message.success(`已提交叠加任务 ${job.job_id}（exclude 共 ${excludedCountTotal} 帧）`);
     } finally {
       setStackSubmitting(false);
     }
@@ -279,26 +326,70 @@ export default function ProcessingPage() {
       message.warning('请选择要拉伸的结果文件');
       return;
     }
+    // Bug A 修复 (a)：提交时立即自增 ?v=，即使 WS/轮询事件丢失，图片也会先强制刷新一次；
+    // 任务完成后 handleJobUpdate 会再按 job.id|done 去重自增一次。
+    setPreviewVersion((v) => v + 1);
     setStretchSubmitting(true);
     try {
-      const job = await apiPost<JobEventData>('/api/process/stretch', {
+      const job = await apiPost<JobSubmitResult>('/api/process/stretch', {
         session_id: selectedId,
         result_file: selectedResult,
         stretch: stretchMethod,
         black,
         white,
       });
-      setJobs((prev) => ({ ...prev, [job.id]: job }));
+      const event = toJobEvent(job);
+      setJobs((prev) => ({ ...prev, [event.id]: event }));
     } finally {
       setStretchSubmitting(false);
     }
   };
+
+  /** 手动「刷新预览」：自增 ?v= 并重新加载详情，与 stretch 完成后的刷新路径一致 */
+  const refreshPreview = useCallback(() => {
+    setPreviewVersion((v) => v + 1);
+    const selected = selectedIdRef.current;
+    if (selected) void loadDetail(selected);
+  }, [loadDetail]);
 
   const availableFrames = useMemo(() => {
     if (!detail) return 0;
     const types: PhaseType[] = detail.phases.length > 0 ? detail.phases.map((p) => p.type) : ALL_PHASE_TYPES;
     return types.reduce((acc, t) => acc + ((detail.frames?.[t] ?? []).filter((f) => !excluded.has(frameKey(t, f.file))).length), 0);
   }, [detail, excluded]);
+
+  // 步骤条推进：以「最新一次对应类型 job」的完成状态为准（rerun 后以新任务覆盖旧状态）
+  const latestJobsByType = useMemo(() => {
+    const latest: Partial<Record<JobEventData['type'], JobEventData>> = {};
+    Object.values(jobs).forEach((job) => {
+      latest[job.type] = job;
+    });
+    return latest;
+  }, [jobs]);
+
+  const calibrateJob = latestJobsByType.calibrate;
+  const stackJob = latestJobsByType.stack;
+  const stretchJob = latestJobsByType.stretch;
+  const calibrateDone = calibrateJob?.status === 'done';
+  const stackDone = stackJob?.status === 'done';
+  const stretchDone = stretchJob?.status === 'done';
+  const calibrateActive =
+    calibrateJob?.status === 'pending' || calibrateJob?.status === 'running';
+  const stackActive = stackJob?.status === 'pending' || stackJob?.status === 'running';
+  const stretchActive = stretchJob?.status === 'pending' || stretchJob?.status === 'running';
+
+  // 步骤条 current：calibrate 完成后进入 Stack 步；stack 完成后进入 Stretch 步；stretch 完成则全部完成
+  const stepCurrent = stretchDone ? 3 : stackDone ? 2 : calibrateDone ? 1 : 0;
+  const stackHint = !calibrateDone
+    ? '请先完成步骤 1 · Calibrate，再运行 Stack。'
+    : stackActive
+      ? 'Stack 任务运行中…'
+      : 'Calibrate 已完成，建议运行 Stack。';
+  const stretchHint = !stackDone
+    ? '请先完成步骤 2 · Stack，再运行 Stretch。'
+    : stretchActive
+      ? 'Stretch 任务运行中…'
+      : 'Stack 已完成，可以应用 Stretch 并刷新预览。';
 
   const selectedResultInfo = detail?.results.find((r) => r.file === selectedResult) ?? null;
   const previewUrl = selectedResultInfo
@@ -405,14 +496,14 @@ export default function ProcessingPage() {
         )}
       </Card>
 
-      <Card size="small" title="处理管线">
+      <Card size="small" title="处理管线（Calibrate → Stack → Stretch）">
         <Steps
           size="small"
-          current={detail?.results.length ? 3 : 1}
+          current={stepCurrent}
           items={[
             { title: '步骤 1：Calibrate', description: '合成 Master 并逐帧标定' },
             { title: '步骤 2：Stack', description: '叠加 + 可选配准' },
-            { title: '步骤 3：Results', description: '结果查看 / 拉伸 / 下载' },
+            { title: '步骤 3：Stretch', description: '拉伸并刷新预览' },
           ]}
           style={{ marginBottom: 16 }}
         />
@@ -436,7 +527,12 @@ export default function ProcessingPage() {
                     />
                   </Form.Item>
                 </Form>
-                <Button type="primary" loading={calSubmitting} disabled={!selectedId} onClick={() => void runCalibrate()}>
+                <Button
+                  type="primary"
+                  loading={calSubmitting}
+                  disabled={!selectedId || calibrateActive}
+                  onClick={() => void runCalibrate()}
+                >
                   运行 Calibrate（排除未勾选帧）
                 </Button>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -467,9 +563,17 @@ export default function ProcessingPage() {
                 <Checkbox checked={registration} onChange={(e) => setRegistration(e.target.checked)}>
                   配准（registration，FFT 相位相关平移对齐）
                 </Checkbox>
-                <Button type="primary" loading={stackSubmitting} disabled={!selectedId} onClick={() => void runStack()}>
+                <Button
+                  type="primary"
+                  loading={stackSubmitting}
+                  disabled={!selectedId || !calibrateDone || stackActive}
+                  onClick={() => void runStack()}
+                >
                   运行 Stack（排除未勾选帧）
                 </Button>
+                <Typography.Text type={calibrateDone ? 'secondary' : 'warning'} style={{ fontSize: 12 }}>
+                  {stackHint}
+                </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   请求体含 exclude：bias {buildExclude().bias.length} / dark {buildExclude().dark.length} / flat {buildExclude().flat.length} / light {buildExclude().light.length}
                 </Typography.Text>
@@ -477,7 +581,7 @@ export default function ProcessingPage() {
             </Card>
           </Col>
           <Col xs={24} lg={8}>
-            <Card size="small" type="inner" title="步骤 3 · Results / Stretch">
+            <Card size="small" type="inner" title="步骤 3 · Stretch">
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Select
                   placeholder="选择结果文件"
@@ -505,11 +609,19 @@ export default function ProcessingPage() {
                   <Typography.Text>white：{white}</Typography.Text>
                   <Slider min={0} max={4095} step={1} value={white} onChange={setWhite} />
                 </div>
-                <Button type="primary" loading={stretchSubmitting} disabled={!selectedResult} onClick={() => void runStretch()}>
+                <Button
+                  type="primary"
+                  loading={stretchSubmitting}
+                  disabled={!selectedResult || !stackDone || stretchActive}
+                  onClick={() => void runStretch()}
+                >
                   应用拉伸并刷新预览
                 </Button>
+                <Typography.Text type={stackDone ? 'secondary' : 'warning'} style={{ fontSize: 12 }}>
+                  {stretchHint}
+                </Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  拉伸输出覆盖 results/STACK_preview.png（8-bit PNG）。
+                  拉伸输出覆盖 results/STACK_preview.png（8-bit PNG）。后端返回 Cache-Control: no-store，前端通过 ?v= 版本参数强制刷新。
                 </Typography.Text>
               </Space>
             </Card>
@@ -517,7 +629,7 @@ export default function ProcessingPage() {
         </Row>
       </Card>
 
-      <Card size="small" title="任务进度（WS /ws/events：capture 与 job 均订阅）">
+      <Card size="small" title="任务进度（WS /ws/events + 1s 轮询 GET /api/process/jobs/{id}）">
         {captureState && captureState.status !== 'idle' && (
           <div style={{ marginBottom: 12 }}>
             <Tag color="geekblue">capture</Tag>
@@ -614,12 +726,24 @@ export default function ProcessingPage() {
             />
             {previewUrl && (
               <div style={{ marginTop: 12, textAlign: 'center' }}>
-                <Typography.Text type="secondary">当前预览（{selectedResult}，stretch 后自动刷新）</Typography.Text>
+                <Space wrap>
+                  <Typography.Text type="secondary">
+                    当前预览（{selectedResult}，stretch 提交 / 完成后自动刷新，?v={previewVersion}）
+                  </Typography.Text>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={refreshPreview}>
+                    刷新预览
+                  </Button>
+                </Space>
                 <div style={{ background: '#000', padding: 8 }}>
                   <img
+                    key={previewUrl}
                     src={previewUrl}
                     alt="stretch preview"
                     style={{ maxWidth: '100%', maxHeight: 560 }}
+                    onLoad={(e) => {
+                      // 修复预览可见性：成功后复位 onError 设置过的 display:none
+                      (e.target as HTMLImageElement).style.display = '';
+                    }}
                     onError={(e) => {
                       (e.target as HTMLImageElement).style.display = 'none';
                     }}

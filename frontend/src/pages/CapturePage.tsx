@@ -42,6 +42,7 @@ import {
 import { useReconnectingWebSocket } from '../api/ws';
 import type {
   CapturePhasePlan,
+  CapturePlanResult,
   CaptureState,
   FrameInfo,
   PhaseType,
@@ -85,6 +86,7 @@ function newRow(): PhaseRow {
 export default function CapturePage() {
   const navigate = useNavigate();
   const [sessionName, setSessionName] = useState('');
+  const [effectiveSessionName, setEffectiveSessionName] = useState<string | null>(null);
   const [rows, setRows] = useState<PhaseRow[]>([]);
   const [starting, setStarting] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -219,8 +221,7 @@ export default function CapturePage() {
       message.warning('每个相位的张数必须是 1–10000 的整数');
       return;
     }
-    const name = sessionName.trim() || `SESSION_${dayjs().format('YYYYMMDDTHHmmss')}`;
-    if (sessionName.trim()) setSessionName(name);
+    const name = sessionName.trim();
     setStarting(true);
     try {
       const phases: CapturePhasePlan[] = rows.map((r) => ({
@@ -229,12 +230,16 @@ export default function CapturePage() {
         exposure_us: r.exposure_us === null || r.exposure_us === undefined ? null : r.exposure_us,
         note: r.note,
       }));
-      await apiPost('/api/capture/plan', { session_name: name, phases });
+      const plan = await apiPost<CapturePlanResult>('/api/capture/plan', { session_name: name, phases });
+      // v1.2：响应里的 session_name 是带时间戳前缀的最终名，创建计划成功后回填并以该值为准
+      const effective = plan.session_name || name || `SESSION_${dayjs().format('YYYYMMDDTHHmmss')}`;
+      setSessionName(effective);
+      setEffectiveSessionName(effective);
       await apiPost<{ status: CaptureState['status'] }>('/api/capture/start');
       setCaptureState({
         ...IDLE_STATE,
         status: 'running',
-        session_name: name,
+        session_name: effective,
         total_frames: phases.reduce((a, b) => a + b.count, 0),
       });
       await refreshCaptureState();
@@ -354,6 +359,8 @@ export default function CapturePage() {
   ];
 
   const totalFrames = rows.reduce((a, b) => a + (Number.isFinite(b.count) ? b.count : 0), 0);
+  // 后续展示以 plan 响应值为准；刷新页面后没有本地 effective 时退回 WS/state 值
+  const sessionDisplayName = effectiveSessionName ?? captureState.session_name ?? '—';
   const done = captureState.frames_done ?? 0;
   const total = captureState.total_frames || totalFrames;
   const progressPct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
@@ -383,10 +390,18 @@ export default function CapturePage() {
         <Form layout="vertical">
           <Row gutter={16}>
             <Col xs={24} md={8}>
-              <Form.Item label="Session 名称" required>
+              <Form.Item
+                label="Session 名称"
+                required
+                extra={
+                  <Typography.Text type="secondary">
+                    将自动添加时间戳前缀（YYYYMMDDTHH-MM-SS_）
+                  </Typography.Text>
+                }
+              >
                 <Input
                   value={sessionName}
-                  placeholder="留空自动生成 SESSION_时间戳"
+                  placeholder="留空使用 session"
                   onChange={(e) => setSessionName(e.target.value)}
                 />
               </Form.Item>
@@ -425,6 +440,15 @@ export default function CapturePage() {
             启动序列拍摄
           </Button>
         </div>
+        {effectiveSessionName && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="success"
+            showIcon
+            message={`本次 Session 名称：${effectiveSessionName}`}
+            description="该名称为后端创建计划后返回的最终名称（含时间戳前缀），后续进度与完成提示均以此为准。"
+          />
+        )}
       </Card>
 
       {(active || terminal) && (
@@ -440,7 +464,7 @@ export default function CapturePage() {
           }
         >
           <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
-            <Descriptions.Item label="Session">{captureState.session_name ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="Session">{sessionDisplayName}</Descriptions.Item>
             <Descriptions.Item label="当前相位">{currentPhaseLabel}</Descriptions.Item>
             <Descriptions.Item label="当前帧">{done}</Descriptions.Item>
             <Descriptions.Item label="总帧数">{total}</Descriptions.Item>
@@ -468,9 +492,9 @@ export default function CapturePage() {
               showIcon
               message={
                 captureState.status === 'finished'
-                  ? '序列拍摄已完成'
+                  ? `序列拍摄已完成（本次 Session 名称：${sessionDisplayName}）`
                   : captureState.status === 'aborted'
-                    ? '已中止（已拍帧保留）'
+                    ? `已中止（已拍帧保留，Session：${sessionDisplayName}）`
                     : `拍摄出错：${captureState.message || '未知错误'}`
               }
               action={

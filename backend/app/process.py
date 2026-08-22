@@ -11,7 +11,8 @@ import numpy as np
 from astropy.io import fits
 from PIL import Image
 
-from .util import (CAPTURES_DIR, auto_contrast_8bit, now_iso)
+from .util import (ascii_fits_value, auto_contrast_8bit, get_captures_dir,
+                   now_iso)
 
 GROUP_TYPES = ("bias", "dark", "flat", "light")
 JOB_TYPES = ("calibrate", "stack", "stretch")
@@ -183,7 +184,7 @@ class ProcessService:
         if not session_id or ".." in session_id or "/" in session_id \
                 or "\\" in session_id:
             raise RuntimeError(f"非法 session_id：{session_id}")
-        d = CAPTURES_DIR / session_id
+        d = get_captures_dir() / session_id
         if not d.is_dir():
             raise RuntimeError(f"会话不存在：{session_id}")
         return d
@@ -263,7 +264,8 @@ class ProcessService:
             cal = np.nan_to_num(cal, nan=0.0, posinf=0.0, neginf=0.0)
             cal = np.maximum(cal, 0.0).astype(np.float32)
             out = d / "calibrated" / f"CAL_{n:04d}.fits"
-            _write_fits(out, cal, SESSION=session_id, NFRAME=orig_idx + 1)
+            _write_fits(out, cal, SESSION=ascii_fits_value(session_id),
+                        NFRAME=orig_idx + 1)
             if n % max(1, len(all_light_items) // 10) == 0:
                 self._update(job_id, progress=55 + int(40 * n / max(
                     len(light_items), 1)),

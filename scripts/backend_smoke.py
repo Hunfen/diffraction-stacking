@@ -10,14 +10,18 @@ import asyncio
 import http.client
 import json
 import os
+import re
+import shutil
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 
@@ -28,6 +32,9 @@ PORT = None
 PROC = None
 RESULTS = []
 SESSION_ID = None
+EFFECTIVE_SESSION_NAME = None
+# 与 step_capture 中用户原始输入对应的 v1.2 清洗结果后缀
+SANITIZED_SESSION_SUFFIX = "SMOKE_LEED_001_a_b_x"
 
 
 def check(cond, msg):
@@ -84,6 +91,16 @@ def raw_request(path: str) -> tuple[int, bytes]:
     body = resp.read()
     conn.close()
     return resp.status, body
+
+
+def raw_response(path: str) -> tuple[int, bytes, dict]:
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    body = resp.read()
+    headers = {k.lower(): v for k, v in resp.getheaders()}
+    conn.close()
+    return resp.status, body, headers
 
 
 def wait_server(timeout=40):
@@ -202,6 +219,106 @@ def step_open_properties():
     check(r.get("ok") and r["data"]["actual"] is True, "开启 mock 慢漂移")
 
 
+def step_settings():
+    default_root = (REPO / "data").resolve()
+    status, s = http_req("GET", "/api/settings")
+    check(status == 200 and s.get("ok") and s["data"]["data_root"] == str(default_root),
+          "GET /api/settings 返回默认数据目录（绝对路径）")
+    check(isinstance(s["data"].get("writable"), bool)
+          and s["data"]["writable"] is True,
+          "settings.writable 为布尔值且默认目录可写")
+
+    _, bad = http_req("PUT", "/api/settings", {"data_root": "relative/path"},
+                      expect=400)
+    check(not bad.get("ok") and "绝对路径" in bad.get("error", ""),
+          "相对路径 data_root 返回 400（中文错误）")
+
+    tmp_base = Path(tempfile.mkdtemp(prefix="ds-stack-smoke-"))
+    tmp_root = (tmp_base / "backend-data").resolve()
+    status, r = http_req("PUT", "/api/settings", {"data_root": str(tmp_root)})
+    check(status == 200 and r.get("ok")
+          and r["data"]["data_root"] == str(tmp_root)
+          and r["data"].get("writable") is True,
+          "PUT /api/settings 自动创建并切换数据目录")
+    check((tmp_root / "snapshots").is_dir()
+          and (tmp_root / "captures").is_dir(),
+          "新数据目录下自动创建 snapshots/ 与 captures/")
+    _, r2 = http_req("GET", "/api/settings")
+    check(r2.get("ok") and r2["data"]["data_root"] == str(tmp_root),
+          "GET /api/settings 立即反映运行中修改")
+
+    _, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
+    check(snap.get("ok") and snap["data"]["url"].startswith("/api/files/snapshots/"),
+          "切换数据目录后 snapshot 成功")
+    if snap.get("ok"):
+        new_file = tmp_root / "snapshots" / snap["data"]["file"]
+        check(new_file.is_file(), "snapshot 落在新数据目录 snapshots/")
+        check(not (default_root / "snapshots" / snap["data"]["file"]).exists(),
+              "默认数据目录不产生该快照")
+        status, body, headers = raw_response(snap["data"]["url"])
+        check(status == 200 and headers.get("cache-control") == "no-store",
+              "snapshot 文件响应含 Cache-Control: no-store")
+
+    status, r3 = http_req("PUT", "/api/settings", {"data_root": str(default_root)})
+    check(status == 200 and r3.get("ok")
+          and r3["data"]["data_root"] == str(default_root),
+          "PUT /api/settings 恢复默认数据目录")
+    shutil.rmtree(tmp_base, ignore_errors=True)
+
+
+def step_chinese_session():
+    """v1.2 FIX：中文 session 真实拍摄，FITS SESSION 头必须 ASCII 安全。"""
+    raw_name = "中文_LEED测试"
+    phases = [{"type": "bias", "count": 2, "exposure_us": 3000,
+               "note": "中文会话 smoke"}]
+    status, plan = http_req("POST", "/api/capture/plan",
+                            {"session_name": raw_name, "phases": phases})
+    check(status == 200 and plan.get("ok"), "中文 session_name 的 capture/plan 成功")
+    effective = (plan.get("data") or {}).get("session_name")
+    check(bool(effective) and "中文" in effective and "LEED" in effective,
+          f"effective session_name 保留中文：{effective}")
+    check(re.fullmatch(r"^\d{8}T\d{2}-\d{2}-\d{2}_中文_LEED测试$",
+                       effective or "") is not None,
+          "中文 effective 格式为 时间戳_中文原始名")
+
+    status, r = http_req("POST", "/api/capture/start")
+    check(status == 200 and r.get("ok") and r["data"]["status"] == "running",
+          "中文会话 capture/start 成功")
+    state = poll_state(lambda s: s.get("status") == "finished", timeout=60)
+    check(state.get("status") == "finished", "中文会话拍摄完成（finished）")
+    check(state.get("frames_done") == 2, "中文会话 frames_done == 2")
+
+    _, sess = http_req("GET", "/api/sessions")
+    target = next((s for s in sess.get("data", []) if s.get("id") == effective),
+                  None)
+    check(target is not None and target.get("name") == effective,
+          "sessions 列表保留中文 effective id/name")
+    if target:
+        check(target.get("frame_counts", {}).get("bias") == 2,
+              "中文会话 frame_counts.bias == 2")
+
+    _, detail = http_req("GET", f"/api/sessions/{quote(effective, safe='')}")
+    check(detail.get("ok") and detail["data"].get("name") == effective,
+          "session 详情 name 保留中文 effective")
+    frames = (detail.get("data") or {}).get("frames", {}).get("bias", [])
+    check(len(frames) == 2, "中文会话详情 frames.bias == 2")
+    if frames:
+        check(effective in frames[0].get("url", ""),
+              "帧 URL 保留中文 effective")
+
+    try:
+        from astropy.io import fits
+        with fits.open(REPO / "data" / "captures" / effective
+                       / "bias" / "BIAS_0001.fits") as hdul:
+            session_hdr = hdul[0].header.get("SESSION")
+        check(isinstance(session_hdr, str) and session_hdr.isascii()
+              and session_hdr.isprintable() and bool(session_hdr.strip()),
+              f"FITS SESSION 头为 printable ASCII：{session_hdr!r}")
+        check("中文" not in session_hdr, "FITS SESSION 头不含中文")
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"中文会话 FITS 读取异常：{exc}")
+
+
 def step_live_snapshot():
     status, r = http_req("POST", "/api/live/start",
                          {"fps": 10, "scale": 0.5, "quality": 70})
@@ -271,7 +388,7 @@ def step_live_snapshot():
 
 
 def step_capture():
-    global SESSION_ID
+    global SESSION_ID, EFFECTIVE_SESSION_NAME
     phases = [
         {"type": "bias", "count": 3, "exposure_us": 30, "note": "smoke bias"},
         {"type": "dark", "count": 3, "exposure_us": None, "note": "smoke dark"},
@@ -283,17 +400,29 @@ def step_capture():
                                 expect=400)
     check(status == 400 and not bad_plan.get("ok"), "空 phases 的 plan 返回 400")
 
+    raw_session_name = "SMOKE LEED/001:a*b?x"
     status, plan = http_req("POST", "/api/capture/plan",
-                            {"session_name": "SMOKE_LEED_001", "phases": phases})
+                            {"session_name": raw_session_name, "phases": phases})
     check(status == 200 and plan.get("ok") and plan["data"].get("plan_id"),
           "capture/plan 返回 plan_id")
     echoed = plan["data"]["phases"]
     check(len(echoed) == 4 and echoed[0]["type"] == "bias"
           and echoed[1]["exposure_us"] == 3000, "plan 回显并解析 null 曝光为当前值")
 
+    effective = plan["data"].get("session_name")
+    EFFECTIVE_SESSION_NAME = effective
+    expected_re = r"^\d{8}T\d{2}-\d{2}-\d{2}_" + SANITIZED_SESSION_SUFFIX + r"$"
+    check(bool(effective) and re.fullmatch(expected_re, effective) is not None,
+          f"plan 返回 effective session_name（时间戳前缀_清洗名）：{effective}")
+    check(not re.search(r'[<>:"/\\|?*\s]', effective or ""),
+          "effective session_name 不含路径分隔符/Windows 非法字符/空白")
+
     status, r = http_req("POST", "/api/capture/start")
     check(status == 200 and r.get("ok") and r["data"]["status"] == "running",
           "capture/start 成功")
+    _, state0 = http_req("GET", "/api/capture/state")
+    check(state0.get("ok") and state0["data"].get("session_name") == effective,
+          "capture state 的 session_name 使用 effective")
 
     # v1.1 状态机：非 LIGHT 相位 waiting_user(needs_user=false) → 自动 capturing
     bias_wait = poll_state(
@@ -327,7 +456,10 @@ def step_capture():
     # 拍摄进行中提交处理任务应 409（会话目录此时已创建）
     _, sess_now = http_req("GET", "/api/sessions")
     cur = next((s for s in sess_now["data"]
-                if s["name"] == "SMOKE_LEED_001"), None)
+                if s["name"] == EFFECTIVE_SESSION_NAME), None)
+    if cur:
+        check(cur["id"] == EFFECTIVE_SESSION_NAME,
+              "sessions 列表 id == effective session_name")
     if cur:
         _, r409 = http_req("POST", "/api/process/calibrate",
                            {"session_id": cur["id"]}, expect=409)
@@ -380,11 +512,15 @@ def step_capture():
     check(state.get("frames_done") == 12, "frames_done == 12")
     # 从 sessions 列表取 id
     _, sess = http_req("GET", "/api/sessions")
-    sids = [s["id"] for s in sess["data"] if s["name"] == "SMOKE_LEED_001"]
-    check(bool(sids), "sessions 列表包含本次会话")
+    sids = [s["id"] for s in sess["data"] if s["name"] == EFFECTIVE_SESSION_NAME]
+    check(bool(sids), "sessions 列表包含本次会话（name=effective）")
     if sids:
         SESSION_ID = sids[0]
+        check(SESSION_ID == EFFECTIVE_SESSION_NAME,
+              "sessions 列表 id == effective session_name")
         target = next(s for s in sess["data"] if s["id"] == SESSION_ID)
+        check(target["name"] == EFFECTIVE_SESSION_NAME,
+              "sessions 列表 name 使用 effective")
         fc = target["frame_counts"]
         check(fc == {"bias": 3, "dark": 3, "flat": 3, "light": 3},
               "frame_counts 各相位 3 帧")
@@ -393,6 +529,9 @@ def step_capture():
 def step_session_files():
     _, detail = http_req("GET", f"/api/sessions/{SESSION_ID}")
     d = detail["data"]
+    check(d.get("id") == EFFECTIVE_SESSION_NAME
+          and d.get("name") == EFFECTIVE_SESSION_NAME,
+          "session 详情的 id 与 name 使用 effective")
     check(len(d["phases"]) == 4, "session 详情含 4 个 phase")
     for g in ("bias", "dark", "flat", "light"):
         frames = d["frames"].get(g, [])
@@ -403,8 +542,10 @@ def step_session_files():
                                         "saturated_pct")), f"{g} 帧字段齐全")
             check(isinstance(f0["mean"], (int, float)), f"{g} 帧含 mean 统计")
     f0 = d["frames"]["bias"][0]
-    status, body = raw_request(f0["url"])
+    status, body, headers = raw_response(f0["url"])
     check(status == 200 and body[:6] == b"SIMPLE", "FITS 文件可下载（SIMPLE 头）")
+    check(headers.get("cache-control") == "no-store",
+          "GET /api/files 响应头含 Cache-Control: no-store")
     try:
         from astropy.io import fits
         with fits.open(REPO / "data" / "captures" / SESSION_ID
@@ -424,9 +565,11 @@ def step_session_files():
         check(False, f"FITS 头校验异常：{exc}")
     status, body = raw_request(f0["thumb"])
     check(status == 200 and body[:4] == b"\x89PNG", "缩略图 PNG 可下载")
-    status, body = raw_request(f"/api/files/{SESSION_ID}/meta.json")
-    check(status == 200 and json.loads(body).get("name") == "SMOKE_LEED_001",
-          "meta.json 可下载")
+    status, body, headers = raw_response(f"/api/files/{SESSION_ID}/meta.json")
+    check(status == 200 and json.loads(body).get("name") == EFFECTIVE_SESSION_NAME,
+          "meta.json 可下载且 name 为 effective")
+    check(headers.get("cache-control") == "no-store",
+          "meta.json 响应头含 Cache-Control: no-store")
 
     status, body = raw_request(f"/api/files/{SESSION_ID}/bias/../meta.json")
     check(status == 400, "路径穿越（bias/../meta.json）被拒绝为 400")
@@ -535,6 +678,8 @@ def main():
         wait_server()
         step_health_devices()
         step_open_properties()
+        step_settings()
+        step_chinese_session()
         step_live_snapshot()
         step_capture()
         step_session_files()

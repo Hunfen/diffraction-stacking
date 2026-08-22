@@ -12,6 +12,7 @@ npm-debug.log*
 
 # Runtime data
 data/
+backend/.data_root.json
 *.fits
 *.fit
 

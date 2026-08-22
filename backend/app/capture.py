@@ -19,9 +19,10 @@ from astropy.io import fits
 from PIL import Image
 
 from .camera import CameraService
-from .util import (CAPTURES_DIR, FITS_HEADER_MEAN, FITS_HEADER_STD,
-                   FITS_HEADER_SATPCT, SNAPSHOT_DIR, auto_contrast_8bit,
-                   frame_stats, now_iso, now_stamp, safe_name)
+from .util import (FITS_HEADER_MEAN, FITS_HEADER_STD,
+                   FITS_HEADER_SATPCT, ascii_fits_value, auto_contrast_8bit,
+                   frame_stats, get_captures_dir, get_snapshots_dir, now_iso,
+                   now_stamp, sanitize_session_name)
 
 PHASE_TYPES = ("bias", "dark", "flat", "light")
 ACTIVE_STATUSES = {"running", "waiting_user", "capturing"}
@@ -117,9 +118,11 @@ class CaptureService:
                     "note": ph.get("note") or "",
                 })
             plan_id = "plan-" + uuid.uuid4().hex[:8]
+            # v1.2：session_name 为用户原始输入；effective = 本地时间戳_清洗名。
+            effective = f"{now_stamp()}_{sanitize_session_name(session_name)}"
             self._plan = {
                 "plan_id": plan_id,
-                "session_name": session_name.strip() or "session",
+                "session_name": effective,
                 "phases": normalized,
             }
             return dict(self._plan)
@@ -193,10 +196,10 @@ class CaptureService:
     # ------------------------------------------------------------ 执行
     def _run(self, plan: dict) -> None:
         self._created = now_iso()
-        session_name = safe_name(plan["session_name"])
-        ts = now_stamp()
-        session_id = f"{ts}_{session_name}"
-        session_dir = CAPTURES_DIR / session_id
+        # v1.2：plan 阶段已生成 effective session_name（时间戳_清洗名），
+        # 会话目录 id 与其保持一致。
+        session_id = plan["session_name"]
+        session_dir = get_captures_dir() / session_id
         try:
             session_dir.mkdir(parents=True, exist_ok=False)
             for g in PHASE_TYPES:
@@ -204,8 +207,8 @@ class CaptureService:
             self._set(session_name=plan["session_name"], message="创建会话目录")
             self._write_meta(session_dir, session_id, plan, "running")
         except FileExistsError:
-            session_id = f"{ts}_{session_name}_{uuid.uuid4().hex[:4]}"
-            session_dir = CAPTURES_DIR / session_id
+            session_id = f"{plan['session_name']}_{uuid.uuid4().hex[:4]}"
+            session_dir = get_captures_dir() / session_id
             session_dir.mkdir(parents=True, exist_ok=False)
             for g in PHASE_TYPES:
                 (session_dir / g / "thumbs").mkdir(parents=True, exist_ok=True)
@@ -290,6 +293,7 @@ class CaptureService:
         group_dir = session_dir / ptype
         thumbs_dir = group_dir / "thumbs"
         consecutive_failures = 0
+        successful_frames = 0
         # 进入实际拍摄：status 必须是 capturing（非 LIGHT 由 _run 切换，
         # LIGHT 由 resume 切换；此处兜底保证口径一致）
         self._set(status="capturing", needs_user=False)
@@ -306,12 +310,16 @@ class CaptureService:
                 black = self.camera.get_property("black_level")
                 temp = self.camera.get_property("device_temperature")
                 cam = self.camera.device
-                self._save_fits(group_dir / f"{name}.fits", frame, stats,
-                                ptype, exposure, gain, black, temp, cam, n)
+                try:
+                    self._save_fits(group_dir / f"{name}.fits", frame, stats,
+                                    ptype, exposure, gain, black, temp, cam, n)
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(f"FITS 写入失败：{exc}") from exc
                 thumb = auto_contrast_8bit(frame)
                 Image.fromarray(thumb, mode="L").save(
                     thumbs_dir / f"{name}.png", optimize=False)
                 consecutive_failures = 0
+                successful_frames += 1
                 with self._lock:
                     self._state["frames_done"] += 1
                 self._log(f"{ptype.upper()} {n}/{phase['count']} 完成 "
@@ -323,10 +331,16 @@ class CaptureService:
                 self._log(f"{ptype.upper()} 第 {n} 帧失败：{exc}")
                 self._push()
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    self._log("连续 5 帧抓取失败，自动中止")
-                    self._finish("error", "连续 5 帧抓取失败，自动中止")
+                    self._log("连续 5 帧失败，自动中止")
+                    self._finish("error", "连续 5 帧失败，自动中止")
                     return False
                 time.sleep(0.05)
+        if successful_frames == 0 and consecutive_failures > 0:
+            # 防止“帧全丢但状态 finished”的假完成：
+            # 该相位一帧都没落盘时按 error 中止，而非继续走 finished。
+            self._log(f"{ptype.upper()} 所有帧均失败，自动中止")
+            self._finish("error", f"{ptype.upper()} 所有帧均失败，自动中止")
+            return False
         return True
 
     def _finish(self, status: str, message: str) -> None:
@@ -354,7 +368,9 @@ class CaptureService:
         header["FRAMETYP"] = frametype.upper()
         header["CAMERA"] = str(getattr(cam, "name", "unknown"))
         header["SERIAL"] = str(getattr(cam, "serial", "unknown"))
-        header["SESSION"] = str(self._session_id or "")
+        # FITS 头只接受 printable ASCII：transliterate/替换非 ASCII，
+        # 目录名、meta.json、URL、sessions 列表仍保留原始 effective 中文名。
+        header["SESSION"] = ascii_fits_value(str(self._session_id or ""))
         header["NFRAME"] = int(nframe)
         header[FITS_HEADER_MEAN] = float(stats["mean"])
         header[FITS_HEADER_STD] = float(stats["std"])
@@ -384,8 +400,9 @@ class CaptureService:
 
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
                   props: dict | None = None) -> dict:
-    """单帧快照 → data/snapshots/。FITS 头补齐契约关键字。"""
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    """单帧快照 → <data_root>/snapshots/。FITS 头补齐契约关键字。"""
+    snap_dir = get_snapshots_dir()
+    snap_dir.mkdir(parents=True, exist_ok=True)
     ts = now_stamp()
     cam = cam or {}
     props = props or {}
@@ -402,15 +419,15 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
         hdu.header["SERIAL"] = str(cam.get("serial", "unknown"))
         hdu.header["SESSION"] = "SNAPSHOT"
         hdu.header["NFRAME"] = 1
-        hdu.writeto(SNAPSHOT_DIR / name, overwrite=True)
+        hdu.writeto(snap_dir / name, overwrite=True)
     elif fmt == "tiff":
         name = f"SNP_{ts}.tiff"
         Image.fromarray(np.asarray(frame, dtype=np.uint16), mode="I;16").save(
-            SNAPSHOT_DIR / name)
+            snap_dir / name)
     elif fmt == "png":
         name = f"SNP_{ts}.png"
         Image.fromarray(auto_contrast_8bit(frame), mode="L").save(
-            SNAPSHOT_DIR / name)
+            snap_dir / name)
     else:
         raise RuntimeError(f"不支持的快照格式：{fmt}（仅支持 fits|tiff|png）")
     return {"file": name, "url": f"/api/files/snapshots/{name}"}

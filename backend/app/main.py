@@ -28,9 +28,10 @@ from .camera import CameraService, CameraError, ic4_available
 from .capture import CaptureService, save_snapshot
 from .process import ProcessService
 from .sessions import get_session, list_sessions
-from .util import (CAPTURES_DIR, CONTENT_TYPES, DATA_ROOT, REPO_ROOT,
-                   auto_contrast_8bit, ensure_dirs, frame_stats, histogram_256,
-                   ok)
+from .util import (CONTENT_TYPES, REPO_ROOT, auto_contrast_8bit, ensure_dirs,
+                   frame_stats, get_captures_dir, get_data_root,
+                   get_snapshots_dir, histogram_256,
+                   is_data_root_writable, ok, set_data_root)
 
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 INDEX_HTML = DIST_DIR / "index.html"
@@ -306,6 +307,10 @@ class SnapshotBody(BaseModel):
     format: str = "fits"
 
 
+class SettingsBody(BaseModel):
+    data_root: str
+
+
 class PhaseIn(BaseModel):
     type: str
     count: int = Field(ge=1, le=10000)
@@ -348,6 +353,35 @@ def health():
         "platform": sys.platform,
         "camera_driver": "ic4" if ic4_available() else "mock",
     })
+
+
+@app.get("/api/settings")
+def settings_get():
+    root = get_data_root()
+    return ok({"data_root": str(root), "writable": is_data_root_writable(root)})
+
+
+@app.put("/api/settings")
+def settings_put(body: SettingsBody):
+    raw = body.data_root.strip()
+    if not raw:
+        raise HTTPException(400, "data_root 不能为空")
+    root = Path(raw)
+    if not root.is_absolute():
+        raise HTTPException(400, "data_root 必须是绝对路径")
+    root = root.resolve()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "snapshots").mkdir(parents=True, exist_ok=True)
+        (root / "captures").mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(400, f"无法创建数据目录：{exc}")
+    try:
+        set_data_root(root)
+    except OSError as exc:
+        raise HTTPException(400, f"保存数据目录设置失败：{exc}")
+    return ok({"data_root": str(get_data_root()),
+               "writable": is_data_root_writable(root)})
 
 
 @app.get("/api/devices")
@@ -472,7 +506,8 @@ def capture_plan(body: PlanBody):
         plan = capture_service.plan(body.session_name, phases)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc))
-    return ok({"plan_id": plan["plan_id"], "phases": plan["phases"]})
+    return ok({"plan_id": plan["plan_id"], "session_name": plan["session_name"],
+               "phases": plan["phases"]})
 
 
 @app.post("/api/capture/start")
@@ -530,26 +565,27 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
     if session_id == "snapshots":
         if "/" in rel_path:
             raise HTTPException(400, "非法路径")
-        base = DATA_ROOT / "snapshots"
+        base = get_snapshots_dir()
         path = base / rel_path
         if path.resolve().parent != base.resolve():
             raise HTTPException(400, "非法路径")
         return path
+    captures_dir = get_captures_dir()
     parts = rel_path.split("/")
     groups = {"bias", "dark", "flat", "light", "masters", "calibrated"}
     if parts == ["meta.json"]:
-        path = CAPTURES_DIR / session_id / "meta.json"
+        path = captures_dir / session_id / "meta.json"
     elif len(parts) == 2 and parts[0] in groups | {"results"}:
         if not parts[1]:
             raise HTTPException(400, "非法路径")
-        path = CAPTURES_DIR / session_id / parts[0] / parts[1]
+        path = captures_dir / session_id / parts[0] / parts[1]
     elif len(parts) == 3 and parts[0] in groups and parts[1] == "thumbs":
         if not parts[2]:
             raise HTTPException(400, "非法路径")
-        path = CAPTURES_DIR / session_id / parts[0] / "thumbs" / parts[2]
+        path = captures_dir / session_id / parts[0] / "thumbs" / parts[2]
     else:
         raise HTTPException(400, "非法路径")
-    session_base = (CAPTURES_DIR / session_id).resolve()
+    session_base = (captures_dir / session_id).resolve()
     resolved = path.resolve()
     if resolved != session_base and session_base not in resolved.parents:
         raise HTTPException(400, "非法路径")
@@ -562,7 +598,9 @@ def files(session_id: str, rel_path: str):
     if not path.is_file():
         raise HTTPException(404, f"文件不存在：{rel_path}")
     media = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-    return FileResponse(path, media_type=media)
+    # v1.2：前端拉伸预览等场景依赖最新文件，禁止缓存。
+    return FileResponse(path, media_type=media,
+                        headers={"Cache-Control": "no-store"})
 
 
 # =========================================================================
@@ -607,7 +645,7 @@ def _validate_exclude(session_id: str, exclude: dict | None) -> dict:
             if "/" in name or "\\" in name or ".." in name \
                     or Path(name).name != name:
                 raise HTTPException(400, f"exclude 只接受文件名（不含路径）：{name}")
-            target = CAPTURES_DIR / session_id / group / name
+            target = get_captures_dir() / session_id / group / name
             if not target.is_file():
                 raise HTTPException(400, f"exclude 文件不存在：{group}/{name}")
             clean.append(name)

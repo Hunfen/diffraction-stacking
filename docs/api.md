@@ -1,4 +1,4 @@
-# Diffraction Stacking — 前后端 API 契约 v1.1
+# Diffraction Stacking — 前后端 API 契约 v1.2
 
 > 本文件是后端（FastAPI）与前端（React）之间的**唯一契约**。
 > 前后端必须严格按本文件实现；发现契约歧义时先报告船长，不得各自发挥。
@@ -21,14 +21,43 @@
 - 500 响应统一返回 `error:"服务器内部错误"`，不泄漏内部异常细节
 - 时间格式：ISO 8601（`YYYY-MM-DDTHH:MM:SS`，本地时区，不带 Z）；FITS `DATE-OBS` 精确到毫秒（`YYYY-MM-DDTHH:MM:SS.mmm`）
 - 帧数据口径：相机 12-bit，内存 uint16，数值 ≤ 4095；FITS 16-bit 存储、数据在低 12 位
+- 数据目录（v1.2）：所有运行时文件统一落在 `data_root` 下（`snapshots/`、`captures/`）。
+  `data_root` 由 `GET/PUT /api/settings` 暴露，运行中修改立即生效；启动优先级：
+  `DIFF_DATA_ROOT` 环境变量 > `backend/.data_root.json` > `<repo>/data`
 - 文件下载接口 `GET /api/files/{session_id}/{rel_path}`：`rel_path` 允许 `meta.json`、`<group>/<file>`、`<group>/thumbs/<file>`、`results/<file>`；必须做路径穿越防护，非法路径返回 400
   - `<group>` ∈ `bias|dark|flat|light`（含 `thumbs/` 子目录）；`masters/` 与 `calibrated/` 目录下的文件同样可直接访问（如 `masters/MASTER_DARK.fits`）
+  - 所有 `/api/files/**` 响应头固定带 `Cache-Control: no-store`（v1.2，保证拉伸预览等文件永远取最新版本）
 
 ---
 
 ## 2. REST 端点
 
-### 2.1 健康与设备
+### 2.1 数据目录设置（v1.2）
+
+**GET /api/settings**
+
+```json
+{ "ok": true, "data": { "data_root": "/Users/me/diffraction_stacking/data", "writable": true }, "error": null }
+```
+
+- `data_root`：当前生效的**绝对路径**
+- `writable`：当前进程对 `data_root` 是否可写（布尔值）
+
+**PUT /api/settings** — body `{ "data_root": "/abs/path/to/data" }`
+
+```json
+{ "ok": true, "data": { "data_root": "/abs/path/to/data", "writable": true }, "error": null }
+```
+
+- 校验：`data_root` 必须是非空绝对路径，否则 **400**（中文错误）
+- `data_root` 不存在时自动创建 `data_root`、`data_root/snapshots/`、`data_root/captures/`；
+  创建失败返回 **400**（中文错误）
+- 成功返回新的 `{data_root, writable}`，并**立即生效**：CaptureService、session 扫描、
+  snapshot、处理管线每次读写都通过动态 `data_root` 访问器读取当前值（不得启动时一次性固化）
+- 持久化到 `backend/.data_root.json`（内容 `{"data_root": "<绝对路径>"}`，已加入 `.gitignore`）；
+  启动优先级：环境变量 `DIFF_DATA_ROOT` > `backend/.data_root.json` > 默认 `<repo>/data`
+
+### 2.2 健康与设备
 
 **GET /api/health**
 
@@ -69,12 +98,12 @@
 
 ```json
 { "ok": true, "data": { "id": "mock-1", "name": "Mock LEED/RHEED Camera",
-  "serial": "MOCK-0001", "connected": true, "properties": [ <见 2.2> ] }, "error": null }
+  "serial": "MOCK-0001", "connected": true, "properties": [ <见 2.3> ] }, "error": null }
 ```
 
 未打开设备时 `connected:false`、`properties:[]`。
 
-### 2.2 属性
+### 2.3 属性
 
 **GET /api/properties**
 
@@ -106,7 +135,7 @@
 - 越界值自动钳制到 min/max，`actual` 为相机实际生效值
 - 未打开设备返回 409
 
-### 2.3 实时预览与抓拍
+### 2.4 实时预览与抓拍
 
 **POST /api/live/start** — body `{ "fps": 15, "scale": 1.0, "quality": 80 }`
 
@@ -136,11 +165,11 @@
   "url": "/api/files/snapshots/SNP_20260822T10-00-00.fits" }, "error": null }
 ```
 
-- 快照存 `data/snapshots/`，16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
+- 快照存 `<data_root>/snapshots/`，16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
 - 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`）
 - 未打开设备返回 409
 
-### 2.4 序列拍摄
+### 2.5 序列拍摄
 
 **POST /api/capture/plan** — body：
 
@@ -153,9 +182,29 @@
 ]}
 ```
 
+- `session_name` 为用户**原始输入**；后端计算 effective session name（v1.2）：
+
+  ```
+  effective = <YYYYMMDDTHH-MM-SS>_<sanitize(input)>   # 本地时间
+  ```
+
+  `sanitize`：去除路径分隔符与 Windows 非法字符 `< > : " / \ | ? *` 及空白
+  （统一替换为 `_`）；空输入（或清洗后为空）使用 `"session"`。
+  非 ASCII 字符（如中文）保留于目录名/meta/URL，但 FITS 头 `SESSION` 写 ASCII 安全值。
+- 响应 `data` 中的 `session_name` 为 effective（拍摄目录 id、meta.json 的 `name`、
+  `/api/sessions` 与 `/api/sessions/{id}` 的 `id`/`name`、capture state 的 `session_name`
+  均使用 effective，不再使用原始输入）
 - `exposure_us: null` = 沿用当前相机曝光；非 null = 该相位强制覆盖（拍摄时设置、相位结束不恢复）
 - `type` ∈ `bias|dark|flat|light`；`count` 1–10000；`phases` 不能为空（空数组返回 400）
-- 返回 `{ "ok": true, "data": { "plan_id": "...", "phases": [ ...校验后回显 ] }, "error": null }`
+
+```json
+{ "ok": true, "data": {
+  "plan_id": "plan-abc12345",
+  "session_name": "20260822T10-00-00_LEED_Si111_001",
+  "phases": [ ...校验后回显... ]
+}, "error": null }
+```
+
 - 拍摄中重新 plan 返回 409
 
 **POST /api/capture/start** — 无 body。要求已 plan 且设备已打开。
@@ -169,7 +218,7 @@
 ```json
 { "ok": true, "data": {
   "status": "waiting_user",
-  "session_name": "LEED_Si111_001",
+  "session_name": "20260822T10-00-00_LEED_Si111_001",
   "current_phase": { "type": "light", "index": 3, "total": 4 },
   "frames_done": 110, "total_frames": 210,
   "prompt": "请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light",
@@ -180,6 +229,7 @@
 ```
 
 - `status` ∈ `idle|running|waiting_user|capturing|finished|aborted|error`
+- `session_name` 为 effective session name（v1.2，含时间戳前缀）
 - `needs_user`：当前相位是否需要人工确认。**所有相位开始前都会进入 `waiting_user` 并给出该相位 prompt**；
   非 LIGHT 相位 `needs_user=false`，展示约 0.2s 后自动进入 `capturing`（prompt 转入 `message`）；
   **LIGHT 相位 `needs_user=true`，必须 POST /api/capture/resume 才进入 `capturing`**
@@ -200,30 +250,32 @@
 进度与状态变化经 **WS /ws/events** 推送：
 
 ```json
-{ "topic": "capture", "data": { "status": "...", "session_name": "...",
+{ "topic": "capture", "data": { "status": "...", "session_name": "20260822T10-00-00_LEED_Si111_001",
   "current_phase": { "type": "light", "index": 3, "total": 4 },
   "frames_done": 111, "total_frames": 210, "prompt": "...", "message": "...",
   "needs_user": true } }
 ```
 
-### 2.5 Session 与文件
+### 2.6 Session 与文件
 
 **GET /api/sessions**
 
 ```json
 { "ok": true, "data": [
-  { "id": "20260822T10-00-00_LEED_Si111_001", "name": "LEED_Si111_001",
+  { "id": "20260822T10-00-00_LEED_Si111_001", "name": "20260822T10-00-00_LEED_Si111_001",
     "created": "2026-08-22T10:00:00",
     "frame_counts": { "bias": 50, "dark": 30, "flat": 30, "light": 100 },
     "has_results": false }
 ], "error": null }
 ```
 
+- v1.2：`id` 与 `name` 均为 effective session name（时间戳前缀 + 清洗后的用户输入）
+
 **GET /api/sessions/{id}**
 
 ```json
 { "ok": true, "data": {
-  "id": "20260822T10-00-00_LEED_Si111_001", "name": "LEED_Si111_001",
+  "id": "20260822T10-00-00_LEED_Si111_001", "name": "20260822T10-00-00_LEED_Si111_001",
   "created": "2026-08-22T10:00:00",
   "phases": [ { "type": "bias", "count": 50, "exposure_us": 30, "note": "" } ],
   "frames": {
@@ -238,9 +290,12 @@
 }, "error": null }
 ```
 
-**GET /api/files/{session_id}/{rel_path}** — 文件下载/访问；`snapshots` 目录以 `session_id=snapshots` 表达。
+- v1.2：`name` 为 effective session name（与 `id` 一致，非原始输入）
 
-### 2.6 数据处理
+**GET /api/files/{session_id}/{rel_path}** — 文件下载/访问；`snapshots` 目录以 `session_id=snapshots` 表达。
+响应头固定带 `Cache-Control: no-store`。
+
+### 2.7 数据处理
 
 拍摄状态为 `running|waiting_user|capturing` 时提交任何处理任务返回 **409**。
 
@@ -298,11 +353,13 @@
 
 ### 3.1 磁盘布局
 
+`data_root` 默认 `<repo>/data`，可用 `GET/PUT /api/settings` 或 `DIFF_DATA_ROOT` 环境变量配置（见 §2.1）：
+
 ```
-data/
+<data_root>/
   snapshots/SNP_*.{fits,tiff,png}
-  captures/<时间戳>_<session_name>/
-    meta.json            # {name, created, phases[], camera{...}}
+  captures/<effective_session_name>/
+    meta.json            # {id, name, created, phases[], camera{...}}；name 为 effective session name
     bias/  BIAS_0001.fits ...  + thumbs/BIAS_0001.png
     dark/  DARK_0001.fits ...  + thumbs/DARK_0001.png
     flat/  FLAT_0001.fits ...  + thumbs/FLAT_0001.png
@@ -319,7 +376,7 @@ DATE-OBS   ISO 8601 毫秒      EXPOSURE   曝光 µs
 GAIN       dB                 BLACKLEV   黑电平 ADU
 TEMP       传感器温度 °C        FRAMETYP   BIAS|DARK|FLAT|LIGHT|SNAPSHOT
 CAMERA     'DMK 33GX249e'     SERIAL     序列号
-SESSION    session 名          NFRAME     帧序号
+SESSION    effective session 名（v1.2）    NFRAME     帧序号
 BITPIX=16（有效位 12）
 ```
 
@@ -360,6 +417,8 @@ qc_report.json = { frames, total_exposure_us, effective_bits≈log2√N,
 - axios 统一封装：解包 `{ok,data,error}`，`ok=false` → antd `message.error(error)`
 - WS 消息：`typeof data === 'string'` 解析 JSON；`data instanceof Blob/ArrayBuffer` 走图像路径
 - 所有图片/文件 URL 使用后端返回的 `url` 字段，**不自行拼接**
+- 会话展示/详情使用后端返回的 `id`/`name`（v1.2 起 `name` 为 effective session name，含时间戳前缀）
+- 数据目录通过 `GET/PUT /api/settings` 查看与修改（v1.2）；不得自行拼接磁盘路径
 - 后端地址：`/settings` 可配置（默认 `http://localhost:8000`，localStorage 持久化）；
   dev 模式 vite 代理 `/api`、`/api/files`、`/ws`（ws:true）
 - 生产模式：FastAPI 将 `frontend/dist/` 挂载到 `/`，SPA 子路由 fallback 到 index.html

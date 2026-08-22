@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -14,8 +14,14 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CheckCircleOutlined, CloudServerOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons';
-import { apiGet } from '../api/client';
+import {
+  CheckCircleOutlined,
+  CloudServerOutlined,
+  DatabaseOutlined,
+  ReloadOutlined,
+  SaveOutlined,
+} from '@ant-design/icons';
+import { apiGet, apiPut } from '../api/client';
 import { clearBackend, DEFAULT_BACKEND, getBackend, normalizeBackend, setBackend } from '../api/backend';
 import {
   DEFAULT_PREVIEW,
@@ -24,7 +30,7 @@ import {
   setPreviewSettings,
   type PreviewSettings,
 } from '../api/settings';
-import type { HealthInfo } from '../api/types';
+import type { DataDirSettings, HealthInfo } from '../api/types';
 
 type HealthStatus = 'checking' | 'ok' | 'error';
 
@@ -34,6 +40,47 @@ export default function SettingsPage() {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [healthStatus, setHealthStatus] = useState<HealthStatus>('checking');
   const [healthError, setHealthError] = useState('');
+  const [dataDir, setDataDir] = useState<DataDirSettings | null>(null);
+  const [dataRootInput, setDataRootInput] = useState('');
+  const [dataDirLoading, setDataDirLoading] = useState(true);
+  const [dataDirSaving, setDataDirSaving] = useState(false);
+  const [dataDirError, setDataDirError] = useState('');
+
+  const loadDataDir = useCallback(async () => {
+    setDataDirLoading(true);
+    setDataDirError('');
+    try {
+      const settings = await apiGet<DataDirSettings>('/api/settings', { silent: true });
+      setDataDir(settings);
+      setDataRootInput(settings.data_root);
+    } catch (err) {
+      setDataDir(null);
+      setDataDirError(err instanceof Error ? err.message : '无法加载数据目录设置');
+    } finally {
+      setDataDirLoading(false);
+    }
+  }, []);
+
+  const saveDataDir = async () => {
+    const dataRoot = dataRootInput.trim();
+    if (!dataRoot) {
+      message.warning('请输入数据目录的绝对路径');
+      return;
+    }
+    setDataDirSaving(true);
+    setDataDirError('');
+    try {
+      const next = await apiPut<DataDirSettings>('/api/settings', { data_root: dataRoot });
+      setDataDir(next);
+      setDataRootInput(next.data_root);
+      message.success(`数据目录已保存：${next.data_root}`);
+    } catch (err) {
+      // 400 等失败时展示后端 error（apiPut 非 silent 已同时弹出 message.error）
+      setDataDirError(err instanceof Error ? err.message : '保存失败，请检查后端返回的错误信息');
+    } finally {
+      setDataDirSaving(false);
+    }
+  };
 
   const checkHealth = async (targetBackend = backendInput) => {
     setHealthStatus('checking');
@@ -58,6 +105,11 @@ export default function SettingsPage() {
     void checkHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 数据目录：加载时 GET /api/settings
+  useEffect(() => {
+    void loadDataDir();
+  }, [loadDataDir]);
 
   const saveBackend = () => {
     const normalized = normalizeBackend(backendInput);
@@ -118,6 +170,64 @@ export default function SettingsPage() {
           当前生效地址：{getBackend()}。dev 模式下 REST 请求经 vite 代理（目标由启动时 VITE_BACKEND / 默认
           localhost:8000 决定）；WS 实时流与图片/文件 URL 直接使用这里保存的地址，修改后立即生效。
           生产模式下 FastAPI 托管 frontend/dist，同源访问。
+        </Typography.Paragraph>
+      </Card>
+
+      <Card
+        title={
+          <Space>
+            <DatabaseOutlined />
+            数据目录
+          </Space>
+        }
+        loading={dataDirLoading}
+      >
+        <Row gutter={16} align="middle">
+          <Col flex="auto">
+            <Input
+              size="large"
+              value={dataRootInput}
+              onChange={(e) => setDataRootInput(e.target.value)}
+              placeholder="请输入数据目录绝对路径，例如 /Users/me/astro-data"
+              addonBefore="PATH"
+            />
+          </Col>
+          <Col>
+            <Space>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={dataDirSaving}
+                onClick={() => void saveDataDir()}
+              >
+                保存
+              </Button>
+              <Button icon={<ReloadOutlined />} onClick={() => void loadDataDir()}>
+                重新加载
+              </Button>
+            </Space>
+          </Col>
+        </Row>
+        {dataDir && (
+          <Descriptions bordered size="small" column={2} style={{ marginTop: 12 }}>
+            <Descriptions.Item label="data_root">{dataDir.data_root}</Descriptions.Item>
+            <Descriptions.Item label="writable">
+              <Tag color={dataDir.writable ? 'green' : 'red'}>{dataDir.writable ? 'true（可写）' : 'false（只读）'}</Tag>
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+        {dataDirError && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="error"
+            showIcon
+            message="数据目录设置操作失败"
+            description={dataDirError}
+          />
+        )}
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+          修改后新拍摄写入新目录，旧数据留在原目录。保存成功以 PUT /api/settings 返回的 data_root / writable
+          为准；非法路径或目录创建失败时后端返回 400 错误。
         </Typography.Paragraph>
       </Card>
 

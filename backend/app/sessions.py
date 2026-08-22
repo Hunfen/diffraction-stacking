@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .util import (CAPTURES_DIR, FITS_HEADER_MEAN, FITS_HEADER_STD,
-                   FITS_HEADER_SATPCT)
+from .util import (FITS_HEADER_MEAN, FITS_HEADER_STD,
+                   FITS_HEADER_SATPCT, get_captures_dir)
 
 FRAME_GROUPS = ("bias", "dark", "flat", "light")
 
@@ -23,10 +23,11 @@ def _count_group(session_dir: Path, group: str) -> int:
 
 
 def list_sessions() -> list[dict]:
-    if not CAPTURES_DIR.is_dir():
+    captures_dir = get_captures_dir()
+    if not captures_dir.is_dir():
         return []
     out = []
-    for d in sorted(CAPTURES_DIR.iterdir(), reverse=True):
+    for d in sorted(captures_dir.iterdir(), reverse=True):
         if not d.is_dir():
             continue
         meta = {}
@@ -97,7 +98,7 @@ def _results_of_session(session_id: str, results_dir: Path) -> list[dict]:
 def get_session(session_id: str) -> dict | None:
     if not _safe_session_id(session_id):
         return None
-    d = CAPTURES_DIR / session_id
+    d = get_captures_dir() / session_id
     if not d.is_dir():
         return None
     meta = {}

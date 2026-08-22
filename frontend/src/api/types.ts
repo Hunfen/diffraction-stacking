@@ -91,7 +91,14 @@ export interface CapturePhasePlan {
 
 export interface CapturePlanResult {
   plan_id: string;
+  /** v1.2：带时间戳前缀的最终 session 名（后端计算并写入响应，所有后续展示以该值为准） */
+  session_name: string;
   phases: CapturePhasePlan[];
+}
+
+export interface DataDirSettings {
+  data_root: string;
+  writable: boolean;
 }
 
 export type CaptureStatus =
@@ -177,6 +184,14 @@ export interface JobResult {
   result: unknown;
 }
 
+/** POST /api/process/{calibrate|stack|stretch} 提交响应（字段名为 job_id，与 WS/GET 的 id 不同） */
+export interface JobSubmitResult {
+  job_id: string;
+  type: 'calibrate' | 'stack' | 'stretch';
+  status: 'pending' | 'running' | 'done' | 'error';
+}
+
+/** WS /ws/events 与 GET /api/process/jobs/{id} 返回的 job 负载（字段名为 id） */
 export interface JobEventData {
   id: string;
   type: 'calibrate' | 'stack' | 'stretch';
