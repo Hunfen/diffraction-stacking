@@ -72,10 +72,11 @@ const JOB_STATUS_META: Record<JobEventData['status'], { color: string; text: str
 const isValidJobId = (id: string): boolean => typeof id === 'string' && id.length > 0 && id !== 'undefined';
 
 /** POST /api/process/* 响应是 {job_id,...}，统一归一成 jobs 表使用的 JobEventData（字段名 id） */
-const toJobEvent = (submitted: JobSubmitResult): JobEventData => ({
+const toJobEvent = (submitted: JobSubmitResult, sessionId?: string): JobEventData => ({
   id: submitted.job_id,
   type: submitted.type,
   status: submitted.status,
+  session_id: submitted.session_id ?? sessionId,
 });
 
 export default function ProcessingPage() {
@@ -119,8 +120,10 @@ export default function ProcessingPage() {
       const list = await apiGet<SessionSummary[]>('/api/sessions');
       setSessions(list);
       setSelectedId((prev) => prev ?? list[0]?.id);
+      if (!list[0]?.id && !selectedIdRef.current) setDetailLoading(false);
     } catch {
       setSessions([]);
+      if (!selectedIdRef.current) setDetailLoading(false);
     } finally {
       setSessionsLoading(false);
     }
@@ -134,9 +137,13 @@ export default function ProcessingPage() {
         if (cancelled) return;
         setSessions(list);
         setSelectedId((prev) => prev ?? list[0]?.id);
+        if (!list[0]?.id && !selectedIdRef.current) setDetailLoading(false);
       })
       .catch(() => {
-        if (!cancelled) setSessions([]);
+        if (!cancelled) {
+          setSessions([]);
+          if (!selectedIdRef.current) setDetailLoading(false);
+        }
       })
       .finally(() => {
         if (!cancelled) setSessionsLoading(false);
@@ -150,8 +157,14 @@ export default function ProcessingPage() {
     setDetailLoading(true);
     try {
       const data = await apiGet<SessionDetail>(`/api/sessions/${id}`);
+      // 防止慢响应在用户切换会话后到达，把旧会话的 detail/exclusion 场景带回来。
+      if (selectedIdRef.current !== id) return;
       setDetail(data);
-      setSelectedResult((prev) => prev ?? data.results[0]?.file);
+      setSelectedResult((prev) =>
+        prev && data.results.some((r) => r.file === prev)
+          ? prev
+          : data.results[0]?.file,
+      );
     } catch {
       setDetail(null);
     } finally {
@@ -159,7 +172,8 @@ export default function ProcessingPage() {
     }
   }, []);
 
-  // selectedId 变化时内联加载详情；手动切换时由 Select onChange 置 detailLoading=true
+  // selectedId 变化时内联加载详情；排除集合在 Select onChange 中同步清空，
+  // 初始加载时 excluded 本来就是空 Set，无需在 effect 内 setState。
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
@@ -167,7 +181,11 @@ export default function ProcessingPage() {
       .then((data) => {
         if (cancelled) return;
         setDetail(data);
-        setSelectedResult((prev) => prev ?? data.results[0]?.file);
+        setSelectedResult((prev) =>
+          prev && data.results.some((r) => r.file === prev)
+            ? prev
+            : data.results[0]?.file,
+        );
       })
       .catch(() => {
         if (!cancelled) setDetail(null);
@@ -207,6 +225,8 @@ export default function ProcessingPage() {
       processedTerminalEventsRef.current.add(terminalKey);
 
       const selected = selectedIdRef.current;
+      // job 负载带 session_id 时，只刷新/自增当前选中会话的 UI，避免跨会话误触发。
+      if (job.session_id && job.session_id !== selected) return;
       if (selected) {
         const reload = loadDetail(selected);
         if (job.type === 'stretch' && job.status === 'done') {
@@ -332,9 +352,11 @@ export default function ProcessingPage() {
         exclude: buildExclude(),
       });
       // 提交响应字段是 job_id，立即归一成 JobEventData 写入 jobs，避免幽灵 pending 行
-      const event = toJobEvent(job);
+      const event = toJobEvent(job, selectedId);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
       message.success(`Calibrate job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setCalSubmitting(false);
     }
@@ -354,9 +376,11 @@ export default function ProcessingPage() {
         registration,
         exclude: buildExclude(),
       });
-      const event = toJobEvent(job);
+      const event = toJobEvent(job, selectedId);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
       message.success(`Stack job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setStackSubmitting(false);
     }
@@ -379,8 +403,10 @@ export default function ProcessingPage() {
         black,
         white,
       });
-      const event = toJobEvent(job);
+      const event = toJobEvent(job, selectedId);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setStretchSubmitting(false);
     }
@@ -399,21 +425,44 @@ export default function ProcessingPage() {
     return types.reduce((acc, t) => acc + ((detail.frames?.[t] ?? []).filter((f) => !excluded.has(frameKey(t, f.file))).length), 0);
   }, [detail, excluded]);
 
-  // 步骤条推进：以「最新一次对应类型 job」的完成状态为准（rerun 后以新任务覆盖旧状态）
+  // 实际落盘帧总数（不是计划帧数）：abort/失败后 denominator 不会虚高。
+  const totalActualFrames = useMemo(() => {
+    if (!detail) return 0;
+    return ALL_PHASE_TYPES.reduce(
+      (acc, t) => acc + ((detail.frames?.[t] ?? []).length),
+      0,
+    );
+  }, [detail]);
+
+  // 只取当前会话的 job（旧负载无 session_id 时保留为全局，兼容旧后端）
+  const jobsForSelectedSession = useMemo(() => {
+    if (!selectedId) return [];
+    return Object.values(jobs).filter(
+      (job) => !job.session_id || job.session_id === selectedId,
+    );
+  }, [jobs, selectedId]);
+
+  // 步骤条推进：以当前会话「最新一次对应类型 job」为准（rerun 后以新任务覆盖旧状态）；
+  // 没有对应 job 时回退到持久化产物标记，保证刷新/切换后已处理会话仍正确解锁后续步骤。
   const latestJobsByType = useMemo(() => {
     const latest: Partial<Record<JobEventData['type'], JobEventData>> = {};
-    Object.values(jobs).forEach((job) => {
+    jobsForSelectedSession.forEach((job) => {
       latest[job.type] = job;
     });
     return latest;
-  }, [jobs]);
+  }, [jobsForSelectedSession]);
 
   const calibrateJob = latestJobsByType.calibrate;
   const stackJob = latestJobsByType.stack;
   const stretchJob = latestJobsByType.stretch;
-  const calibrateDone = calibrateJob?.status === 'done';
-  const stackDone = stackJob?.status === 'done';
-  const stretchDone = stretchJob?.status === 'done';
+
+  const persistedCalibrateDone = Boolean(detail?.has_calibrated || detail?.has_masters);
+  const persistedStackDone = Boolean(detail && detail.results.length > 0);
+  const persistedStretchDone = Boolean(detail?.results.some((r) => r.preview));
+
+  const calibrateDone = calibrateJob ? calibrateJob.status === 'done' : persistedCalibrateDone;
+  const stackDone = stackJob ? stackJob.status === 'done' : persistedStackDone;
+  const stretchDone = stretchJob ? stretchJob.status === 'done' : persistedStretchDone;
   const calibrateActive =
     calibrateJob?.status === 'pending' || calibrateJob?.status === 'running';
   const stackActive = stackJob?.status === 'pending' || stackJob?.status === 'running';
@@ -456,6 +505,8 @@ export default function ProcessingPage() {
             value={selectedId}
             onChange={(v) => {
               setSelectedId(v);
+              setExcluded(new Set());
+              setSelectedResult(undefined);
               setDetailLoading(true);
             }}
             options={sessions.map((s) => ({
@@ -476,7 +527,7 @@ export default function ProcessingPage() {
             <Descriptions.Item label="Name">{detail.name}</Descriptions.Item>
             <Descriptions.Item label="Created">{detail.created}</Descriptions.Item>
             <Descriptions.Item label="Frames Included in Processing (unchecked go to exclude)">
-              {availableFrames} / {detail.phases.reduce((a, p) => a + p.count, 0)}
+              {availableFrames} / {totalActualFrames}
             </Descriptions.Item>
           </Descriptions>
         )}
@@ -694,7 +745,7 @@ export default function ProcessingPage() {
               </Typography.Text>
               {captureState.current_phase && (
                 <Typography.Text>
-                  {PHASE_LABELS[captureState.current_phase.type]} ({captureState.current_phase.index + 1}/{captureState.current_phase.total})
+                  {PHASE_LABELS[captureState.current_phase.type]} ({captureState.current_phase.index}/{captureState.current_phase.total})
                 </Typography.Text>
               )}
             </Space>

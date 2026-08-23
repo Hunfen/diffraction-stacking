@@ -6,7 +6,7 @@ It borrows the deep-sky astrophotography workflow — **Bias / Dark / Flat calib
 to improve SNR and dynamic range of faint diffraction spots. The target is static, so **no equatorial mount,
 guiding, or de-rotation** is needed.
 
-> This is the development documentation (migrated from the repo-root `README.en.md` into `docs/`). User-facing docs: [../README.md](../README.md). 中文开发文档：[DEVELOPMENT.md](DEVELOPMENT.md)
+> This is the development documentation (migrated from the repo-root `README.en.md` into `docs/`). User-facing docs: [../README.en.md](../README.en.md). 中文开发文档：[DEVELOPMENT.md](DEVELOPMENT.md)
 
 ---
 
@@ -81,7 +81,7 @@ flowchart LR
 │   └── backend_smoke.py    # end-to-end backend self-test (Mock full workflow)
 ├── docs/
 │   ├── architecture.md     # architecture design v0.3
-│   ├── api.md              # frontend-backend API contract v1.1
+│   ├── api.md              # frontend-backend API contract v1.4
 │   └── reviews/            # independent review & acceptance reports
 └── data/                   # runtime data (git-ignored)
     ├── snapshots/
@@ -188,7 +188,7 @@ The camera ADC is 12-bit (0–4095). The system therefore:
 
 ```bash
 # Backend end-to-end self-test (exit code 0 = pass)
-cd backend && .venv/bin/python ../scripts/backend_smoke.py   # 114/114 pass
+cd backend && .venv/bin/python ../scripts/backend_smoke.py   # exit code 0 = all pass
 
 # Frontend build & lint
 cd frontend && npm run build && npm run lint
@@ -196,7 +196,7 @@ cd frontend && npm run build && npm run lint
 
 Independent reviews and acceptance runs are recorded in `reviews/`:
 
-- Backend review: smoke 114/114 + edge-case suite (error envelope, state machine, path traversal, SPA fallback) all green
+- Backend review: smoke all pass + edge-case suite (error envelope, state machine, path traversal, SPA fallback) all green
 - Frontend review: 8/8 contract items PASS, build 0 errors
 - Final integration acceptance: 62/62 PASS, P0=0 / P1=0 (full Mock workflow + performance + security regression)
 
@@ -224,7 +224,7 @@ Without hardware the backend always provides `mock-1`:
 ## Documentation
 
 - [architecture.md](architecture.md) — architecture design & key decisions
-- [api.md](api.md) — frontend-backend API contract v1.1
+- [api.md](api.md) — frontend-backend API contract v1.4
 - [reviews/](reviews/) — review & acceptance reports
 - [../backend/README.md](../backend/README.md) — backend and Windows real-camera deployment details
 - [../frontend/README.md](../frontend/README.md) — frontend development notes

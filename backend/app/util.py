@@ -47,12 +47,13 @@ def sanitize_session_name(name: str) -> str:
 
     去除/替换路径分隔符与 Windows 非法字符 < > : " / \\ | ? * 及空白；
     空输入返回 "session"。非 ASCII 字符（如中文）与下划线等合法字符保留。
+    Windows 不允许目录名以点结尾，因此清洗后去掉尾部点。
     """
     raw = (name or "").strip()
     if not raw:
         return "session"
-    cleaned = _ILLEGAL_SESSION_CHARS.sub("_", raw)
-    return cleaned
+    cleaned = _ILLEGAL_SESSION_CHARS.sub("_", raw).rstrip(".")
+    return cleaned or "session"
 
 
 def sanitize_prefix(prefix: str | None) -> str:

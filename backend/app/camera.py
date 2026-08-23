@@ -619,6 +619,23 @@ class IC4Camera(BaseCamera):
         # DMK 33GX249e 官方技术手册 §5.1.1.3：Mono16 像素数据在高 12 位。
         self._always_shift_mono16 = False
 
+    @property
+    def opened(self) -> bool:
+        """IC4 连接状态必须反映 Grabber 的实际有效性。
+
+        BaseCamera.opened 只看 _opened，设备被拔出后 _opened 仍为 True，
+        会导致 CameraService.open 短路返回一个已经失效的 Grabber。
+        """
+        if not self._opened:
+            return False
+        grabber = self._grabber
+        if grabber is None:
+            return False
+        try:
+            return bool(grabber.is_device_open and grabber.is_device_valid)
+        except Exception:  # noqa: BLE001
+            return False
+
     # ---------------------------------------------------------------- 开关
     def open(self) -> None:
         with self._lock:
@@ -978,7 +995,26 @@ class IC4Camera(BaseCamera):
                         f"Property {name} is locked. Stop acquisition or disable auto control first.",
                         status=409)
                 actual_arg = self._coerce_value(prop, name, value, ptype)
-                pmap.set_value(pid, actual_arg)
+                if ptype == "bool":
+                    try:
+                        pmap.set_value(pid, actual_arg)
+                    except Exception:
+                        # 部分相机的 bool 契约属性底层是枚举（如 TriggerMode=On/Off），
+                        # 直接用 Python bool 会类型不匹配；回退到常见枚举字符串。
+                        candidates = (["On", "True", "1"] if actual_arg
+                                      else ["Off", "False", "0"])
+                        for cand in candidates:
+                            try:
+                                pmap.set_value(pid, cand)
+                                break
+                            except Exception:
+                                continue
+                        else:
+                            raise CameraError(
+                                f"Failed to set property {name}: no matching enum value "
+                                f"for boolean {actual_arg}", status=400)
+                else:
+                    pmap.set_value(pid, actual_arg)
             except CameraError:
                 raise
             except Exception as exc:  # noqa: BLE001

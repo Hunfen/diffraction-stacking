@@ -72,7 +72,7 @@ flowchart LR
 │   └── backend_smoke.py    # 后端端到端自测（Mock 全流程）
 ├── docs/
 │   ├── architecture.md     # 架构设计 v0.3
-│   ├── api.md              # 前后端 API 契约 v1.1
+│   ├── api.md              # 前后端 API 契约 v1.4
 │   └── reviews/            # 独立评审与集成验收报告
 └── data/                   # 运行时数据（git 忽略）
     ├── snapshots/
@@ -177,7 +177,7 @@ cd backend
 
 ```bash
 # 后端端到端自测（退出码 0 = 通过）
-cd backend && .venv/bin/python ../scripts/backend_smoke.py   # 114/114 通过
+cd backend && .venv/bin/python ../scripts/backend_smoke.py   # 退出码 0 = 全部通过
 
 # 前端构建与 lint
 cd frontend && npm run build && npm run lint
@@ -185,7 +185,7 @@ cd frontend && npm run build && npm run lint
 
 已执行的独立评审与验收（见 `reviews/`）：
 
-- 后端独立评审：smoke 114/114 + 补测（错误包裹、状态机、路径穿越、SPA fallback 等）全绿
+- 后端独立评审：smoke 全部通过 + 补测（错误包裹、状态机、路径穿越、SPA fallback 等）全绿
 - 前端独立评审：契约对照 8/8 PASS，构建 0 error
 - 最终集成验收：62/62 PASS，P0=0 / P1=0（Mock 全流程 + 性能 + 安全回归）
 
@@ -209,7 +209,7 @@ cd frontend && npm run build && npm run lint
 ## 文档
 
 - [architecture.md](architecture.md) — 架构设计与关键决策
-- [api.md](api.md) — 前后端 API 契约 v1.1
+- [api.md](api.md) — 前后端 API 契约 v1.4
 - [reviews/](reviews/) — 评审与验收报告
 - [../backend/README.md](../backend/README.md) — 后端与 Windows 真机部署细节
 - [../frontend/README.md](../frontend/README.md) — 前端开发说明

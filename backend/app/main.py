@@ -25,7 +25,7 @@ from PIL import Image
 
 from . import APP_VERSION
 from .camera import CameraService, CameraError, ic4_available
-from .capture import CaptureService, save_snapshot
+from .capture import ACTIVE_STATUSES, CaptureService, save_snapshot
 from .process import ProcessService
 from .sessions import get_session, list_sessions
 from .util import (CONTENT_TYPES, REPO_ROOT, auto_contrast_8bit, ensure_dirs,
@@ -107,47 +107,87 @@ class LiveManager:
 # 实时流服务：抓帧线程 + 最新帧队列(maxsize=1) + 推流线程
 # =========================================================================
 class LiveService:
-    def __init__(self, camera_service: CameraService, manager: LiveManager):
+    MAX_CONSECUTIVE_FAILURES = 5
+
+    def __init__(self, camera_service: CameraService, manager: LiveManager,
+                 events_broadcast=None):
         self.camera = camera_service
         self.manager = manager
+        self.events_broadcast = events_broadcast
         self.streaming = False
         self.params: dict = {"fps": 15, "scale": 1.0, "quality": 80}
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._queue: queue.Queue = queue.Queue(maxsize=1)
         self._grabber: threading.Thread | None = None
         self._pusher: threading.Thread | None = None
+        self._error: str | None = None
+
+    def get_state(self) -> dict:
+        with self._lock:
+            return {"streaming": self.streaming,
+                    "error": self._error,
+                    "params": dict(self.params)}
 
     def start(self, fps: int, scale: float, quality: int) -> dict:
-        if self.streaming:
-            raise RuntimeError("Live stream is already running")
-        self.camera.ensure_device()
-        if not isinstance(fps, int) or not (1 <= fps <= 30):
-            raise RuntimeError("fps must be between 1 and 30")
-        if scale not in (1.0, 0.5, 0.25):
-            raise RuntimeError("scale only supports 1.0 / 0.5 / 0.25")
-        if not isinstance(quality, int):
-            raise RuntimeError("quality must be an integer")
-        quality = max(10, min(quality, 100))
-        self.params = {"fps": fps, "scale": scale, "quality": quality}
-        self.streaming = True
-        self._stop.clear()
-        self._grabber = threading.Thread(target=self._grab_loop, daemon=True,
-                                         name="live-grabber")
-        self._pusher = threading.Thread(target=self._push_loop, daemon=True,
-                                        name="live-pusher")
-        self._grabber.start()
-        self._pusher.start()
-        return {"streaming": True, "fps": fps, "scale": scale,
-                "quality": quality}
+        with self._lock:
+            if self.streaming:
+                raise RuntimeError("Live stream is already running")
+            # Do not start a new stream until any previous threads have fully
+            # exited; otherwise stop()/start() races can leave duplicate
+            # grabber/pusher pairs running against the same queue.
+            for t in (self._grabber, self._pusher):
+                if t is not None and t.is_alive():
+                    t.join(timeout=5.0)
+            if any(t is not None and t.is_alive()
+                   for t in (self._grabber, self._pusher)):
+                raise RuntimeError("Previous live stream is still stopping")
+            self._grabber = self._pusher = None
+            self.camera.ensure_device()
+            if not isinstance(fps, int) or not (1 <= fps <= 30):
+                raise RuntimeError("fps must be between 1 and 30")
+            if scale not in (1.0, 0.5, 0.25):
+                raise RuntimeError("scale only supports 1.0 / 0.5 / 0.25")
+            if not isinstance(quality, int):
+                raise RuntimeError("quality must be an integer")
+            quality = max(10, min(quality, 100))
+            self.params = {"fps": fps, "scale": scale, "quality": quality}
+            self._error = None
+            self.streaming = True
+            self._stop.clear()
+            self._grabber = threading.Thread(target=self._grab_loop, daemon=True,
+                                             name="live-grabber")
+            self._pusher = threading.Thread(target=self._push_loop, daemon=True,
+                                            name="live-pusher")
+            self._grabber.start()
+            self._pusher.start()
+            return {"streaming": True, "fps": fps, "scale": scale,
+                    "quality": quality}
 
     def stop(self) -> dict:
-        self.streaming = False
+        with self._lock:
+            self.streaming = False
+            self._stop.set()
+            for t in (self._grabber, self._pusher):
+                if t is not None and t.is_alive():
+                    t.join(timeout=2.0)
+            # Keep references if threads are still winding down so start() can
+            # join them before reusing the service.
+            if (self._grabber is None or not self._grabber.is_alive()) and \
+                    (self._pusher is None or not self._pusher.is_alive()):
+                self._grabber = self._pusher = None
+            return {"streaming": False}
+
+    def _fail(self, message: str) -> None:
+        with self._lock:
+            self._error = message
+            self.streaming = False
         self._stop.set()
-        for t in (self._grabber, self._pusher):
-            if t is not None and t.is_alive():
-                t.join(timeout=2.0)
-        self._grabber = self._pusher = None
-        return {"streaming": False}
+        if self.events_broadcast is not None:
+            self.events_broadcast("live", {
+                "status": "error",
+                "error": message,
+            })
 
     def _triggered(self) -> bool:
         try:
@@ -157,6 +197,7 @@ class LiveService:
 
     def _grab_loop(self) -> None:
         interval = 1.0 / max(self.params["fps"], 1)
+        consecutive_failures = 0
         while not self._stop.is_set():
             started = time.monotonic()
             if self._triggered():
@@ -164,6 +205,7 @@ class LiveService:
                 continue
             try:
                 frame = self.camera.grab_frame()
+                consecutive_failures = 0
                 scale = self.params["scale"]
                 if scale == 0.5:
                     frame = frame[::2, ::2]
@@ -174,8 +216,11 @@ class LiveService:
                 except queue.Empty:
                     pass
                 self._queue.put_nowait(frame)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                consecutive_failures += 1
+                if consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    self._fail(f"Live stream failed: {exc}")
+                    return
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
         # 通知推流线程退出
@@ -213,7 +258,8 @@ events_manager = EventsManager()
 live_manager = LiveManager()
 capture_service = CaptureService(camera_service, broadcast=events_manager.broadcast)
 process_service = ProcessService(broadcast=events_manager.broadcast)
-live_service = LiveService(camera_service, live_manager)
+live_service = LiveService(camera_service, live_manager,
+                            events_broadcast=events_manager.broadcast)
 
 
 @asynccontextmanager
@@ -279,7 +325,8 @@ def raise_cam_err(exc: Exception) -> None:
                               "is read-only", "requires a numeric value",
                               "must be an integer")):
         raise HTTPException(400, msg)
-    if "Live stream is already running" in msg:
+    if "Live stream is already running" in msg \
+            or "Previous live stream is still stopping" in msg:
         raise HTTPException(409, msg)
     # 未分类的相机错误：只记日志，不向客户端泄漏异常细节
     logging.getLogger("uvicorn.error").error(
@@ -373,6 +420,8 @@ def settings_put(body: SettingsBody):
     if not root.is_absolute():
         raise HTTPException(400, "data_root must be an absolute path")
     root = root.resolve()
+    if capture_service.get_state()["status"] in ACTIVE_STATUSES:
+        raise HTTPException(409, "Capture in progress, cannot change data directory")
     try:
         root.mkdir(parents=True, exist_ok=True)
         (root / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -398,6 +447,8 @@ def device_open(body: OpenBody):
     known = [d["id"] for d in camera_service.list_devices()]
     if cam_id not in known:
         raise HTTPException(404, f"Device does not exist: {cam_id}")
+    if capture_service.get_state()["status"] in ACTIVE_STATUSES:
+        raise HTTPException(409, "Capture in progress, cannot open device")
     try:
         cam = camera_service.open(cam_id)
     except Exception as exc:  # noqa: BLE001
@@ -408,6 +459,8 @@ def device_open(body: OpenBody):
 
 @app.post("/api/device/close")
 def device_close():
+    if capture_service.get_state()["status"] in ACTIVE_STATUSES:
+        raise HTTPException(409, "Capture in progress, cannot close device")
     camera_service.close()
     return ok({"connected": False})
 
@@ -454,6 +507,11 @@ def live_start(body: LiveStartBody):
 @app.post("/api/live/stop")
 def live_stop():
     return ok(live_service.stop())
+
+
+@app.get("/api/live/state")
+def live_state():
+    return ok(live_service.get_state())
 
 
 @app.websocket("/ws/live")
@@ -503,7 +561,10 @@ _ILLEGAL_SNAPSHOT_FOLDER_CHARS = frozenset('<>:"|?*')
 
 
 def _snapshot_folder_name(folder: str | None) -> str:
-    """v1.3 兼容：校验单段相对子目录名；空值返回 ""（存 snapshots 根目录）。"""
+    """v1.3 兼容：校验单段相对子目录名；空值返回 ""（存 snapshots 根目录）。
+
+    Windows 不允许目录名以点或空格结尾，因此校验后去掉尾部点/空格。
+    """
     raw = (folder or "").strip()
     if not raw:
         return ""
@@ -512,6 +573,9 @@ def _snapshot_folder_name(folder: str | None) -> str:
     bad = sorted(ch for ch in set(raw) if ch in _ILLEGAL_SNAPSHOT_FOLDER_CHARS)
     if bad:
         raise HTTPException(400, f"folder contains illegal characters: {' '.join(bad)}")
+    raw = raw.rstrip(" .")
+    if raw in ("", ".", ".."):
+        raise HTTPException(400, "folder must not contain . or .. segments")
     return raw
 
 
@@ -651,7 +715,7 @@ def session_detail(session_id: str):
 
 
 def _validate_rel_path(session_id: str, rel_path: str) -> Path:
-    if not session_id or ".." in session_id or "/" in session_id \
+    if not session_id or session_id in (".", "..") or "/" in session_id \
             or "\\" in session_id:
         raise HTTPException(400, "Invalid path: session_id is not allowed")
     if not rel_path or rel_path.startswith("/") or "\\" in rel_path \
@@ -768,9 +832,13 @@ async def process_calibrate(body: CalibrateBody):
     _ensure_capture_idle()
     params = body.model_dump()
     params["exclude"] = _validate_exclude(body.session_id, body.exclude)
-    job = process_service.create_job("calibrate", params)
+    try:
+        job = process_service.create_job("calibrate", params)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
     _spawn_job(job["id"])
-    return ok({"job_id": job["id"], "type": "calibrate", "status": "pending"})
+    return ok({"job_id": job["id"], "type": "calibrate", "status": "pending",
+               "session_id": body.session_id})
 
 
 @app.post("/api/process/stack")
@@ -779,18 +847,26 @@ async def process_stack(body: StackBody):
     _ensure_capture_idle()
     params = body.model_dump()
     params["exclude"] = _validate_exclude(body.session_id, body.exclude)
-    job = process_service.create_job("stack", params)
+    try:
+        job = process_service.create_job("stack", params)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
     _spawn_job(job["id"])
-    return ok({"job_id": job["id"], "type": "stack", "status": "pending"})
+    return ok({"job_id": job["id"], "type": "stack", "status": "pending",
+               "session_id": body.session_id})
 
 
 @app.post("/api/process/stretch")
 async def process_stretch(body: StretchBody):
     _check_session(body.session_id)
     _ensure_capture_idle()
-    job = process_service.create_job("stretch", body.model_dump())
+    try:
+        job = process_service.create_job("stretch", body.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
     _spawn_job(job["id"])
-    return ok({"job_id": job["id"], "type": "stretch", "status": "pending"})
+    return ok({"job_id": job["id"], "type": "stretch", "status": "pending",
+               "session_id": body.session_id})
 
 
 @app.get("/api/process/jobs/{job_id}")

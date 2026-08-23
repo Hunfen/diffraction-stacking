@@ -15,6 +15,7 @@ BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 VENV_DIR="$BACKEND_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_MARKER="$VENV_DIR/.deps-installed"
 
 info()  { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m[install]\033[0m %s\n' "$*"; }
@@ -31,14 +32,15 @@ PYTHON_BIN=""
 PYTHON_VERSION=""
 
 # ------------------------------------------------------------------ Python venv
-# Idempotency: if a usable virtualenv already exists we reuse it and skip the
-# pip upgrade / requirements install completely (fast re-runs).
-if [[ -x "$VENV_PYTHON" ]] && \
+# Idempotency: a virtualenv is reused only when it has both a usable Python and
+# the .deps-installed marker written after a successful requirements install.
+# This prevents a failed first install from being skipped on the next run.
+if [[ -x "$VENV_PYTHON" ]] && [[ -f "$VENV_MARKER" ]] && \
    "$VENV_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
   info "Reusing existing virtualenv: $VENV_DIR"
 else
   if [[ -e "$VENV_DIR" ]]; then
-    warn "Existing $VENV_DIR is broken or unusable; recreating it."
+    warn "Existing $VENV_DIR is broken, incomplete, or missing the dependency marker; recreating it."
     rm -rf "$VENV_DIR"
   fi
 
@@ -89,6 +91,7 @@ EOF
   if ! "$VENV_PYTHON" -m pip install -r "$BACKEND_DIR/requirements.txt"; then
     fail "Failed to install backend/requirements.txt (see pip output above)."
   fi
+  : > "$VENV_MARKER"
 fi
 
 # ------------------------------------------------------------------ Node / npm

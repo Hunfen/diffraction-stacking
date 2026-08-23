@@ -206,6 +206,9 @@ export interface SessionDetail {
   frames: Partial<Record<PhaseType, FrameInfo[]>>;
   results: ResultInfo[];
   qc?: Record<string, unknown>;
+  /** v1.5：持久化产物标记，用于处理步骤门控在刷新/切换会话后仍正确 */
+  has_masters?: boolean;
+  has_calibrated?: boolean;
 }
 
 export interface JobResult {
@@ -222,6 +225,8 @@ export interface JobSubmitResult {
   job_id: string;
   type: 'calibrate' | 'stack' | 'stretch';
   status: 'pending' | 'running' | 'done' | 'error';
+  /** v1.5：提交所属会话；旧后端可能缺省，前端可用当前 selectedId 兜底 */
+  session_id?: string;
 }
 
 /** WS /ws/events 与 GET /api/process/jobs/{id} 返回的 job 负载（字段名为 id） */
@@ -231,6 +236,8 @@ export interface JobEventData {
   status: 'pending' | 'running' | 'done' | 'error';
   progress?: number;
   message?: string;
+  /** v1.5：任务所属会话，用于按会话门控与避免跨会话刷新 */
+  session_id?: string;
 }
 
 export interface JobEvent {

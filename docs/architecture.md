@@ -187,16 +187,16 @@ idle → running → (phase 开始前) waiting_user → capturing → phase_done
 ```
 
 - 每个 Phase 分三段：`prepare_prompt（waiting_user）→ capture_loop → phase_report`
-- **所有相位开始前都进入 `waiting_user` 并给出中文 prompt**：
+- **所有相位开始前都进入 `waiting_user` 并给出英文 prompt**（与 api.md 契约一致）：
   - 非 LIGHT 相位 `needs_user=false`：展示约 0.2s 后自动进入 `capturing`（prompt 转入 message）；
   - **LIGHT 相位 `needs_user=true`：强制人工确认点**，前端展示实时预览 + 直方图 + 当前参数，
     由人工对照直方图确认曝光/增益/黑电平设置（中心束过曝程度人工判断可接受）后
     `POST /api/capture/resume` 才进入 `capturing`；系统不自动改参数、不强制束挡
 - `GET /api/capture/state` 与 `/ws/events` 的 capture 消息均携带 `needs_user` 字段
-- 采集线程与保存线程分离：帧先进内存队列，保存线程写盘，不阻塞抓帧
-- 每帧保存 **16-bit FITS**（数据在低 12 位）+ 缩略 PNG；可选同步导出 TIFF
+- 当前实现中 FITS/缩略图由 capture runner 线程同步写入；采集线程与保存线程分离尚未实现（历史设计）
+- 每帧保存 **16-bit FITS**（数据在低 12 位）+ 缩略 PNG；TIFF 仅在快照接口支持，序列拍摄不导出 TIFF
 - 每帧记录质量指标：mean / std / 饱和比例 / 温度 / 写入耗时
-- 自动中止规则：连续 5 帧抓取失败；磁盘剩余 < 2 GB 时暂停并告警
+- 自动中止规则：连续 5 帧抓取失败；磁盘剩余空间检查尚未实现
 
 **四个 Phase 的详细定义**（全部 Phase 默认共用同一组
 gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境不同）：
@@ -211,7 +211,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 数量 | 50–100 张 |
 | QC 检查 | 帧均值必须明显 > 0（未被黑电平裁切）；std ≈ 读出噪声量级 |
 | 合成方式 | master_bias = sigma-clipped mean/median（σ=3，迭代 3 次） |
-| 前端引导文案 | “请盖上镜头盖（传感器无光），确认后开始拍摄 Bias” |
+| 前端引导文案 | “Cover the lens (sensor in complete darkness), then confirm to start capturing Bias (shortest exposure)” |
 
 > 12-bit 特有问题：黑电平设置不当会把暗部裁到 0，Bias 均值贴零时立即告警。
 
@@ -226,7 +226,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 温度 | 相机无制冷：**与 light 时间上紧邻拍摄**，每帧记录温度，温度漂移 > 2 °C 告警 |
 | QC 检查 | 均值随曝光/温度单调变化属正常；热像素比例进入报告 |
 | 合成方式 | master_dark = sigma-clipped mean/median |
-| 前端引导文案 | “请保持镜头盖盖上，Dark 曝光 = Light 曝光（X ms），确认后开始” |
+| 前端引导文案 | “Keep the lens covered. Dark uses the same exposure as Light. Confirm to start capturing Dark” |
 
 **flat-dark 规则**：若 Flat 的曝光 ≠ Light 曝光，系统在 Flat 前**自动插入
 一个匹配 Flat 曝光的 flat-dark 子 Phase**；短曝光（<100 ms）时允许配置为
@@ -243,7 +243,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 曝光与 light 不同 | 自动拍匹配的 flat-dark（见 Phase 2 规则） |
 | QC 检查 | 峰值 < 4095（零饱和像素）；中位数在 30–70% 满阱；灰尘/污点进入报告 |
 | 合成方式 | master_flat = mean(flat − flat_dark)（或 − master_bias），归一化到中位数 = 1 |
-| 前端引导文案 | “请提供均匀照明（散焦束或面光源），画面中不要出现衍射斑点” |
+| 前端引导文案 | “Provide uniform illumination (defocused beam or flat light source) with no diffraction spots visible, then confirm to start capturing Flat” |
 
 #### Phase 4 — LIGHT（亮场）
 
@@ -257,7 +257,7 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 | 每帧 QC | mean / std / 背景 std / 饱和像素比例 / 与参考帧的相关系数（漂移检测） |
 | 告警 | 饱和比例仅记录/展示（由人工判断是否可接受）；相关系数连续下降提示漂移 |
 | 数据用途 | 标定 → 叠加 → 弱衍射点提取 |
-| 前端引导文案 | “请恢复正常衍射条件。对照实时预览与直方图人工确认曝光/增益参数，确认后开始连续拍摄 Light” |
+| 前端引导文案 | “Restore normal diffraction conditions. Check the exposure/gain parameters against the live preview and histogram, then confirm to start the continuous Light capture” |
 
 **默认拍摄顺序**：`BIAS → DARK → FLAT → LIGHT`。
 无制冷相机建议把 DARK 紧挨 LIGHT；顺序可在前端拖拽调整。
@@ -265,9 +265,9 @@ gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境�
 **FITS 头部关键字**（借天文惯例）：
 
 ```
-DATE-OBS, EXPOSURE(µs), GAIN(dB), BLACKLEV, TELESCOP=DIFFRACTION,
-CAMERA=DMK 33GX249e, SERIAL, TEMP(°C), FRAMETYP {bias|dark|flat|light},
-SESSION, NFRAME, STACKCNT=1, BITPIX=16(有效位12)
+DATE-OBS, EXPOSURE(µs), GAIN(dB), BLACKLEV, TEMP(°C),
+CAMERA=DMK 33GX249e, SERIAL, FRAMETYP {BIAS|DARK|FLAT|LIGHT|SNAPSHOT},
+SESSION, NFRAME, BITPIX=16(有效位12)
 ```
 
 ### 5.4 数据处理服务 ProcessService
@@ -377,7 +377,7 @@ data/
 **③ 序列拍摄 `/capture`**
 - Session 名称 + Phase 表格：
   `类型 | 张数 | 曝光覆盖 | 增益覆盖 | 说明 | 排序`
-- 快速模板按钮：「默认衍射套装」= bias×50 + dark×50 + flat×50 + light×200
+- 快速模板按钮：「默认衍射套装」= bias×50 + dark×30 + flat×30 + light×100
 - 执行进度条 + 实时缩略图墙（最后 20 帧）
 - 阶段间暂停弹窗：「请盖上镜头盖，开始拍 Dark」
 - 单帧查看（可标记 Bad，后续处理自动排除）
@@ -434,12 +434,12 @@ data/
 
 ```
 创建 Plan → start
-每个 phase 开始前: waiting_user（中文 prompt；非 LIGHT needs_user=false，0.2s 后自动继续）
+每个 phase 开始前: waiting_user（英文 prompt；非 LIGHT needs_user=false，0.2s 后自动继续）
 phase[0] bias:  连续拍 N 张（最短曝光）
 phase[1] dark:  提示盖镜头盖 → 自动进入 capturing → 连续拍 N 张（同 light 曝光）
 phase[2] flat:  提示均匀照明 → 自动进入 capturing → 拍 N 张
 phase[3] light: 提示恢复衍射条件 + needs_user=true → 人工对照直方图确认 → resume → 拍 N 张
-每帧: 采集(12p→uint16) → 保存线程写 FITS + 缩略图 → 更新进度 WS
+每帧: 采集(12p→uint16) → capture runner 同步写 FITS + 缩略图 → 更新进度 WS
 ```
 
 ### 7.3 数据处理

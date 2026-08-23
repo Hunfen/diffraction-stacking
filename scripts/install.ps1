@@ -27,6 +27,7 @@ $BackendDir  = Join-Path $RootDir 'backend'
 $FrontendDir = Join-Path $RootDir 'frontend'
 $VenvDir     = Join-Path $BackendDir '.venv'
 $VenvPython  = Join-Path $VenvDir 'Scripts\python.exe'
+$VenvMarker  = Join-Path $VenvDir '.deps-installed'
 
 function Write-Step {
     param([string]$Message)
@@ -75,21 +76,32 @@ Write-Step "Static AstroPhoto one-command installer"
 Write-Step "Project root: $RootDir"
 
 # ------------------------------------------------------------------ Python
-# Prefer the Python Launcher's 3.12 runtime (py -3.12), fall back to `python`.
+# Prefer Python 3.12/3.11/3.10 through the Python launcher, then fall back to
+# `python` and `python3`. Docs require Python >= 3.10, so all supported
+# launcher versions are tried.
 $PyLauncher = $null
 $PyArg      = $null
+$PyCandidates = @(
+    @{ Launcher = 'py';      Arg = '-3.12' },
+    @{ Launcher = 'py';      Arg = '-3.11' },
+    @{ Launcher = 'py';      Arg = '-3.10' },
+    @{ Launcher = 'py';      Arg = $null },
+    @{ Launcher = 'python';  Arg = $null },
+    @{ Launcher = 'python3'; Arg = $null }
+)
 
-if (Test-Python310 -Launcher 'py' -LauncherArg '-3.12') {
-    $PyLauncher = 'py'
-    $PyArg      = '-3.12'
-} elseif (Test-Python310 -Launcher 'python' -LauncherArg '') {
-    $PyLauncher = 'python'
-    $PyArg      = $null
+foreach ($candidate in $PyCandidates) {
+    if (Test-Python310 -Launcher $candidate.Launcher -LauncherArg $candidate.Arg) {
+        $PyLauncher = $candidate.Launcher
+        $PyArg      = $candidate.Arg
+        break
+    }
 }
 
 if ($null -eq $PyLauncher) {
     Write-Fail @'
-No Python 3.10+ interpreter found (tried `py -3.12`, then `python`).
+No Python 3.10+ interpreter found (tried py -3.12, py -3.11, py -3.10,
+py, python, and python3).
 Install Python 3.12 from https://www.python.org/downloads/ (check
 "Add python.exe to PATH") or run:
   winget install Python.Python.3.12
@@ -106,9 +118,15 @@ if ($null -eq $PyArg) {
 Write-Step "Using Python $PyLauncher $PyArg ($PyVersion)"
 
 # ------------------------------------------------------------------ venv
-if (Test-Path $VenvPython) {
+$VenvUsable = (Test-Path $VenvPython) -and (Test-Path $VenvMarker)`
+    -and (Test-Python310 -Launcher $VenvPython -LauncherArg '')
+if ($VenvUsable) {
     Write-Step "Reusing existing virtualenv: $VenvDir"
 } else {
+    if (Test-Path $VenvDir) {
+        Write-WarnMsg "Existing $VenvDir is broken, incomplete, or missing the dependency marker; recreating it."
+        Remove-Item -Recurse -Force $VenvDir
+    }
     Write-Step "Creating virtualenv: $VenvDir"
     if ($null -eq $PyArg) {
         & $PyLauncher -m venv $VenvDir
@@ -124,6 +142,8 @@ if (Test-Path $VenvPython) {
     Write-Step "Installing backend dependencies from backend\requirements.txt"
     & $VenvPython -m pip install -r (Join-Path $BackendDir 'requirements.txt')
     Test-ExternalExit -Step "Installing backend requirements"
+
+    New-Item -ItemType File -Force -Path $VenvMarker | Out-Null
 }
 
 # ------------------------------------------------------------------ real-camera extras
@@ -188,6 +208,7 @@ npm install failed with what looks like an npm cache or permission problem. Try:
         Write-Fail "npm install failed (see $NpmLog)."
     }
     Write-Ok "npm install completed"
+    Remove-Item -Path $NpmLog -Force -ErrorAction SilentlyContinue
 
     Write-Step "Running npm run build in frontend\"
     & npm run build

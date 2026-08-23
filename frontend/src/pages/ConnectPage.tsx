@@ -35,6 +35,8 @@ export default function ConnectPage() {
     try {
       const list = await apiGet<DeviceItem[]>('/api/devices');
       setDevices(list);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setLoading(false);
     }
@@ -86,6 +88,8 @@ export default function ConnectPage() {
       await apiPost('/api/device/open', { id });
       message.success('Device opened');
       await Promise.all([refreshDevices(), refreshInfo()]);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setActingId(null);
     }
@@ -97,6 +101,8 @@ export default function ConnectPage() {
       await apiPost('/api/device/close');
       message.success('Device closed');
       await Promise.all([refreshDevices(), refreshInfo()]);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setActingId(null);
     }

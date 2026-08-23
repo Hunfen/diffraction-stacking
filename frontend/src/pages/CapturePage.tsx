@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -92,6 +92,10 @@ export default function CapturePage() {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [captureState, setCaptureState] = useState<CaptureState>(IDLE_STATE);
   const [thumbs, setThumbs] = useState<FrameInfo[]>([]);
+  // 缩略图请求序号与会话归属：切换 session 时使旧响应失效，并只显示当前会话的帧。
+  const [thumbSession, setThumbSession] = useState<string | null>(null);
+  const thumbSessionRef = useRef<string | null>(null);
+  const thumbFetchSeqRef = useRef(0);
 
   const active = ['running', 'waiting_user', 'capturing'].includes(captureState.status);
   const terminal = ['finished', 'aborted', 'error'].includes(captureState.status);
@@ -149,13 +153,21 @@ export default function CapturePage() {
 
   const refreshThumbs = useCallback(async (sessionNameNow?: string) => {
     if (!sessionNameNow) return;
+    // 会话切换时立即清掉上一会话的缩略图，并让旧请求失效。
+    if (thumbSessionRef.current !== sessionNameNow) {
+      thumbSessionRef.current = sessionNameNow;
+      setThumbSession(sessionNameNow);
+      setThumbs([]);
+    }
+    const seq = ++thumbFetchSeqRef.current;
     try {
       const sessions = await apiGet<SessionSummary[]>('/api/sessions', { silent: true });
-      const match =
-        sessions.find((s) => s.name === sessionNameNow) ??
-        (sessions.length > 0 ? sessions[0] : undefined);
+      if (seq !== thumbFetchSeqRef.current) return;
+      // 只接受精确匹配的会话，绝不回退到 sessions[0]，避免显示另一个会话的帧。
+      const match = sessions.find((s) => s.name === sessionNameNow);
       if (!match) return;
       const detail = await apiGet<SessionDetail>(`/api/sessions/${match.id}`, { silent: true });
+      if (seq !== thumbFetchSeqRef.current) return;
       const orderedTypes: PhaseType[] =
         detail.phases.length > 0
           ? detail.phases.map((p) => p.type)
@@ -243,6 +255,8 @@ export default function CapturePage() {
         total_frames: phases.reduce((a, b) => a + b.count, 0),
       });
       await refreshCaptureState();
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setStarting(false);
     }
@@ -254,6 +268,8 @@ export default function CapturePage() {
       const state = await apiPost<CaptureState>('/api/capture/resume');
       setCaptureState((prev) => ({ ...prev, ...state }));
       await refreshCaptureState();
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setResumeBusy(false);
     }
@@ -264,6 +280,8 @@ export default function CapturePage() {
       const state = await apiPost<CaptureState>('/api/capture/abort');
       setCaptureState((prev) => ({ ...prev, ...state }));
       await refreshCaptureState();
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       void refreshThumbs();
     }
@@ -365,7 +383,7 @@ export default function CapturePage() {
   const total = captureState.total_frames || totalFrames;
   const progressPct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
   const currentPhaseLabel = captureState.current_phase
-    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index + 1}/${captureState.current_phase.total})`
+    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index}/${captureState.current_phase.total})`
     : '—';
 
   const modalPrompt = useMemo(() => {
@@ -381,8 +399,12 @@ export default function CapturePage() {
   const blockingModal = isBlockingWaiting(captureState);
   const preparingWithoutUser = isPreparingWaiting(captureState);
   const preparingPhaseLabel = captureState.current_phase
-    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index + 1}/${captureState.current_phase.total})`
+    ? `${PHASE_LABELS[captureState.current_phase.type]} (Phase ${captureState.current_phase.index}/${captureState.current_phase.total})`
     : 'Current phase';
+
+  // 只有缩略图归属会话与当前 captureState.session_name 一致时才显示，
+  // 避免切换会话后的首帧渲染短暂显示上一会话的帧。
+  const displayedThumbs = thumbSession === captureState.session_name ? thumbs : [];
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -518,14 +540,14 @@ export default function CapturePage() {
         </Card>
       )}
 
-      {(thumbs.length > 0 || captureState.session_name) && (
-        <Card size="small" title={`Latest Frame Thumbnails (last ${thumbs.length} frames, auto-refresh)`}>
-          {thumbs.length === 0 ? (
+      {(displayedThumbs.length > 0 || captureState.session_name) && (
+        <Card size="small" title={`Latest Frame Thumbnails (last ${displayedThumbs.length} frames, auto-refresh)`}>
+          {displayedThumbs.length === 0 ? (
             <Empty description="No thumbnails yet (they appear automatically as frames are written)" />
           ) : (
             <Image.PreviewGroup>
               <Space wrap size={4}>
-                {thumbs.map((f) => (
+                {displayedThumbs.map((f) => (
                   <Image
                     key={f.file}
                     src={resolveUrl(f.thumb)}

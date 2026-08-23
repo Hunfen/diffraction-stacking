@@ -127,9 +127,18 @@ class ProcessService:
             "message": "Job queued",
             "result": None,
             "params": params,
+            "session_id": params.get("session_id"),
             "created": now_iso(),
         }
         with self._lock:
+            session_id = params.get("session_id")
+            if session_id:
+                for existing in self._jobs.values():
+                    if existing.get("session_id") == session_id \
+                            and existing.get("status") in ("pending", "running"):
+                        raise RuntimeError(
+                            "A processing job is already pending or running "
+                            "for this session")
             self._jobs[job_id] = job
         self._push(job_id)
         return dict(job)
@@ -158,6 +167,7 @@ class ProcessService:
         self.broadcast("job", {
             "id": job["id"], "type": job["type"], "status": job["status"],
             "progress": job["progress"], "message": job["message"],
+            "session_id": job.get("session_id"),
         })
 
     # ------------------------------------------------------------ 执行入口
@@ -181,7 +191,7 @@ class ProcessService:
             self._update(job_id, status="error", message=f"{exc}")
 
     def _session_dir(self, session_id: str) -> Path:
-        if not session_id or ".." in session_id or "/" in session_id \
+        if not session_id or session_id in (".", "..") or "/" in session_id \
                 or "\\" in session_id:
             raise RuntimeError(f"Invalid session_id: {session_id}")
         d = get_captures_dir() / session_id
@@ -252,6 +262,16 @@ class ProcessService:
         if master_flat is not None:
             # 防止归一化平场中的 0 值产生除零 NaN
             flat_ref = np.where(master_flat > 0, master_flat, 1.0).astype(np.float32)
+
+        # 重跑标定时清掉上一次生成的 calibrated/*.fits，避免旧 CAL 文件残留被
+        # _run_stack 全量 glob 时重复/错位叠加（P1 regression）。
+        cal_dir = d / "calibrated"
+        for old in cal_dir.glob("*.fits"):
+            try:
+                old.unlink()
+            except OSError as exc:
+                raise RuntimeError(f"Failed to clear stale calibrated file {old.name}: {exc}") from exc
+
         excluded_light = set(exclude["light"])
         all_light_items = _load_with_headers(d, "light")
         n = 0

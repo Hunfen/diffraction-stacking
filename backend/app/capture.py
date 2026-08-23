@@ -181,7 +181,12 @@ class CaptureService:
                 raise RuntimeError("No capture in progress")
             self._abort_event.set()
             self._resume_event.set()   # 若正在等待人工确认，立即结束
-            self._state["message"] = "Abort requested"
+            # 同步切换到 aborted，避免 API 已返回 aborted 但 state 仍显示
+            # running/waiting_user/capturing。
+            self._state.update(
+                status="aborted", prompt=None, message="Capture aborted",
+                needs_user=False)
+            self._push()
             return {"status": "aborted"}
 
     def shutdown(self) -> None:
@@ -210,11 +215,20 @@ class CaptureService:
         except FileExistsError:
             session_id = f"{plan['session_name']}_{uuid.uuid4().hex[:4]}"
             session_dir = get_captures_dir() / session_id
-            session_dir.mkdir(parents=True, exist_ok=False)
-            for g in PHASE_TYPES:
-                (session_dir / g / "thumbs").mkdir(parents=True, exist_ok=True)
-            self._set(session_name=plan["session_name"])
-            self._write_meta(session_dir, session_id, plan, "running")
+            try:
+                session_dir.mkdir(parents=True, exist_ok=False)
+                for g in PHASE_TYPES:
+                    (session_dir / g / "thumbs").mkdir(parents=True, exist_ok=True)
+                self._set(session_name=session_id)
+                self._write_meta(session_dir, session_id, plan, "running")
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Failed to create session directory: {exc}")
+                self._finish("error", f"Failed to create session directory: {exc}")
+                return
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Failed to create session directory: {exc}")
+            self._finish("error", f"Failed to create session directory: {exc}")
+            return
 
         with self._lock:
             self._session_id = session_id
@@ -304,6 +318,9 @@ class CaptureService:
                 return False
             try:
                 frame = self.camera.grab_frame()
+                if self._abort_event.is_set():
+                    self._finish("aborted", "Capture aborted")
+                    return False
                 stats = frame_stats(frame)
                 name = f"{ptype.upper()}_{n:04d}"
                 exposure = self.camera.get_property("exposure")
@@ -316,9 +333,6 @@ class CaptureService:
                                     ptype, exposure, gain, black, temp, cam, n)
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(f"Failed to write FITS: {exc}") from exc
-                thumb = auto_contrast_8bit(frame)
-                Image.fromarray(thumb, mode="L").save(
-                    thumbs_dir / f"{name}.png", optimize=False)
                 consecutive_failures = 0
                 successful_frames += 1
                 with self._lock:
@@ -327,6 +341,13 @@ class CaptureService:
                           f"(mean={stats['mean']:.1f}, saturated_pct="
                           f"{stats['saturated_pct']:.2f})")
                 self._push()
+                # 缩略图失败不应使已成功落盘的 FITS 帧被计为失败。
+                try:
+                    thumb = auto_contrast_8bit(frame)
+                    Image.fromarray(thumb, mode="L").save(
+                        thumbs_dir / f"{name}.png", optimize=False)
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"{ptype.upper()} thumbnail {n} failed: {exc}")
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
                 self._log(f"{ptype.upper()} frame {n} failed: {exc}")
@@ -384,7 +405,9 @@ class CaptureService:
         cam = self.camera.device
         meta = {
             "id": session_id,
-            "name": plan["session_name"],
+            # 名称与目录 id 保持一致；发生 FileExistsError 后缀冲突时也使用
+            # 实际生效的 session_id，而不是原始 plan 名。
+            "name": session_id,
             "created": getattr(self, "_created", None) or now_iso(),
             "status": status,
             "phases": plan["phases"],

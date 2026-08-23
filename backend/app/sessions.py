@@ -12,7 +12,7 @@ FRAME_GROUPS = ("bias", "dark", "flat", "light")
 
 def _safe_session_id(session_id: str) -> bool:
     return bool(session_id) and "/" not in session_id and "\\" not in session_id \
-        and ".." not in session_id
+        and session_id not in (".", "..")
 
 
 def _count_group(session_dir: Path, group: str) -> int:
@@ -116,6 +116,8 @@ def get_session(session_id: str) -> dict | None:
             qc = json.loads(qc_path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             qc = None
+    masters_dir = d / "masters"
+    calibrated_dir = d / "calibrated"
     return {
         "id": d.name,
         "name": meta.get("name") or d.name,
@@ -124,4 +126,6 @@ def get_session(session_id: str) -> dict | None:
         "frames": frames,
         "results": _results_of_session(session_id, d / "results"),
         "qc": qc,
+        "has_masters": masters_dir.is_dir() and any(masters_dir.glob("*.fits")),
+        "has_calibrated": calibrated_dir.is_dir() and any(calibrated_dir.glob("*.fits")),
     }

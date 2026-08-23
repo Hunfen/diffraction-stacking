@@ -21,7 +21,7 @@ backend/
 
 ```bash
 cd backend
-/opt/homebrew/bin/python3.12 -m venv .venv
+python3.12 -m venv .venv   # Apple Silicon: /opt/homebrew/bin/python3.12; Intel: /usr/local/bin/python3.12
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
@@ -29,7 +29,7 @@ cd backend
 - 打开浏览器：`http://127.0.0.1:8000/docs`（Swagger UI）
 - Mock 设备 `mock-1` 始终可用，macOS 无 ic4 时自动使用 mock，全流程可跑
 - 端到端自测：`cd backend && .venv/bin/python ../scripts/backend_smoke.py`（退出码 0 = 通过）
-- 契约 v1.1：LIGHT 相位前 `needs_user=true` 必须人工 resume；calibrate/stack 支持
+- 契约 v1.4：LIGHT 相位前 `needs_user=true` 必须人工 resume；calibrate/stack 支持
   `exclude` 按文件名排除坏帧；`STACK_*.fits` 为 float32（BITPIX=-32）
 - FITS 温度关键字用短名 `TEMP`（°C），避免 astropy `TEMPERATURE` 触发的 HIERARCH VerifyWarning
 - Mock 性能（本机实测）：1920×1200 全分辨率帧生成约 22–24 fps（衍射场景）/
@@ -93,7 +93,7 @@ ic4 无法与相机交互。`imagingcontrol4` 不在 `requirements.txt` 中（ma
 ## 说明
 
 - `imagingcontrol4` 为**懒加载**：macOS/Linux 未安装时不影响 Mock 模式运行；
-  尝试打开 ic4 设备会返回清晰的中文错误。
+  尝试打开 ic4 设备会返回清晰的英文错误。
 - IC4Camera 打开设备后尽量把 `PIXEL_FORMAT` 设为 `Mono16`，流经 `QueueSink`
   取帧；按 DMK 33GX249e 官方技术手册 §5.1.1.3（Mono16 数据在高 12 位）
   右移 4 位，保证输出符合契约 `uint16、数值 ≤ 4095（低 12 位）`。

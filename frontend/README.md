@@ -33,6 +33,12 @@ npm run dev
   VITE_BACKEND=http://192.168.1.50:8000 npm run dev
   ```
 
+  Windows PowerShell:
+
+  ```powershell
+  $env:VITE_BACKEND="http://192.168.1.50:8000"; npm run dev
+  ```
+
 - 也可以在 **设置页** 修改后端地址（`localStorage` 持久化）。
   WS 实时流与图片/文件 URL **直接使用该地址**，修改后立即生效；
   REST 请求在 dev 下仍走 vite 代理（代理目标由启动时 `VITE_BACKEND` 决定）。

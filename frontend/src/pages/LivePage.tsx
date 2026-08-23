@@ -58,6 +58,18 @@ const SNAPSHOT_PREFIX_KEY = 'ds.snapshot.prefix';
 const SATURATION_WARN_THRESHOLD_PCT = 1.0;
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
 
+/**
+ * 串行化 /api/live/start|stop 生命周期。
+ * 快速离开/重新进入 /live 时，cleanup 的 stop 与下一次 mount 的 start 会进入同一个
+ * 全局队列按序执行，避免 start 先到、迟到的 stop 再把新流停掉。
+ */
+let liveLifecycle: Promise<void> = Promise.resolve();
+function runLiveAction(action: () => Promise<void>): Promise<void> {
+  const next = liveLifecycle.then(action, action);
+  liveLifecycle = next.catch(() => undefined);
+  return next;
+}
+
 /** data_root → 默认快照目录 <data_root>/snapshots。 */
 function defaultSnapshotFolder(dataRoot: string): string {
   return `${dataRoot.replace(/\/+$/, '')}/snapshots`;
@@ -586,19 +598,24 @@ export default function LivePage() {
     onMessage: handleMessage,
   });
 
-  // 挂载时启动实时预览，卸载时停止；自动触发用 silent（未开设备 409 不弹 toast，由页面状态提示）
+  // 挂载时启动实时预览，卸载时停止；自动触发用 silent（未开设备 409 不弹 toast，由页面状态提示）。
+  // start/stop 通过模块级队列串行执行，快速离开/返回时不会出现“迟到的 stop 停掉新流”。
   useEffect(() => {
     let disposed = false;
-    void apiPost('/api/live/start', preview, { silent: true })
-      .then(() => {
-        if (!disposed) setStreamStarted(true);
-      })
-      .catch(() => {
-        if (!disposed) setStreamStarted(false);
-      });
+    void runLiveAction(async () => {
+      // 先确保没有残留流，再启动。
+      await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
+      if (disposed) return;
+      await apiPost('/api/live/start', preview, { silent: true });
+      if (!disposed) setStreamStarted(true);
+    }).catch(() => {
+      if (!disposed) setStreamStarted(false);
+    });
     return () => {
       disposed = true;
-      void apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
+      void runLiveAction(async () => {
+        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
+      });
     };
   }, [preview]);
 
@@ -675,6 +692,8 @@ export default function LivePage() {
       localStorage.setItem(SNAPSHOT_FOLDER_KEY, savedFolder);
       setSnapshotPrefix(savedPrefix);
       localStorage.setItem(SNAPSHOT_PREFIX_KEY, savedPrefix);
+    } catch {
+      /* API client 已弹出错误提示 */
     } finally {
       setSnapshotBusy(false);
     }

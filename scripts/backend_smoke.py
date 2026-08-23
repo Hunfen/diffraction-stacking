@@ -30,6 +30,7 @@ BACKEND = REPO / "backend"
 BASE = None
 PORT = None
 PROC = None
+DATA_ROOT = None
 RESULTS = []
 SESSION_ID = None
 EFFECTIVE_SESSION_NAME = None
@@ -220,7 +221,7 @@ def step_open_properties():
 
 
 def step_settings():
-    default_root = (REPO / "data").resolve()
+    default_root = DATA_ROOT
     status, s = http_req("GET", "/api/settings")
     check(status == 200 and s.get("ok") and s["data"]["data_root"] == str(default_root),
           "GET /api/settings returns default data dir (absolute path)")
@@ -275,7 +276,7 @@ def step_settings():
 
 def step_browse_folders():
     """v1.4: GET /api/browse/folders — 目录浏览（默认 data_root、子目录与 parent、越界 400）。"""
-    root = (REPO / "data").resolve()
+    root = DATA_ROOT
     browse_root = root / "smoke_browse"
     shutil.rmtree(browse_root, ignore_errors=True)
     browse_root.mkdir(parents=True, exist_ok=True)
@@ -383,7 +384,7 @@ def step_chinese_session():
 
     try:
         from astropy.io import fits
-        with fits.open(REPO / "data" / "captures" / effective
+        with fits.open(DATA_ROOT / "captures" / effective
                        / "bias" / "BIAS_0001.fits") as hdul:
             session_hdr = hdul[0].header.get("SESSION")
         check(isinstance(session_hdr, str) and session_hdr.isascii()
@@ -394,11 +395,65 @@ def step_chinese_session():
         check(False, f"failed to read Chinese session FITS: {exc}")
 
 
+def step_dotted_session():
+    """P2 regression: session names containing '..' must stay accessible/processable."""
+    status, plan = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "a..b",
+         "phases": [{"type": "bias", "count": 1, "exposure_us": 3000},
+                    {"type": "light", "count": 1, "exposure_us": 3000}]})
+    check(status == 200 and plan.get("ok"), "dotted session plan succeeds")
+    effective = (plan.get("data") or {}).get("session_name") or ""
+    check(effective.endswith("_a..b"),
+          "dotted session keeps double dots in effective name")
+    _, r = http_req("POST", "/api/capture/start")
+    check(r.get("ok") and r["data"]["status"] == "running",
+          "dotted session start succeeds")
+    light_wait = poll_state(
+        lambda s: s.get("status") == "waiting_user"
+        and (s.get("current_phase") or {}).get("type") == "light", timeout=60)
+    check(light_wait.get("status") == "waiting_user",
+          "dotted session reaches LIGHT waiting_user")
+    http_req("POST", "/api/capture/resume")
+    state = poll_state(lambda s: s.get("status") == "finished", timeout=60)
+    check(state.get("status") == "finished", "dotted session finished")
+
+    _, detail = http_req("GET", f"/api/sessions/{quote(effective, safe='')}")
+    check(detail.get("ok") and (detail.get("data") or {}).get("id") == effective,
+          "dotted session detail is accessible")
+
+    _, r = http_req("POST", "/api/process/calibrate",
+                    {"session_id": effective, "sigma": 3, "method": "mean"})
+    check(r.get("ok") and r["data"].get("job_id"),
+          "dotted session calibrate accepted")
+    job = poll_job(r["data"]["job_id"])
+    check(job["status"] == "done", "dotted session calibrate completes")
+
+    # Trailing-dot sanitization: Windows-invalid session names are cleaned.
+    _, plan2 = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "trail.",
+         "phases": [{"type": "bias", "count": 1, "exposure_us": 3000}]})
+    eff2 = ((plan2.get("data") or {}).get("session_name") or "")
+    check(plan2.get("ok") and not eff2.endswith(".") and eff2.endswith("_trail"),
+          "trailing dot is sanitized from session name")
+
+
 def step_live_snapshot():
-    status, r = http_req("POST", "/api/live/start",
-                         {"fps": 10, "scale": 0.5, "quality": 70})
-    check(status == 200 and r.get("ok") and r["data"]["streaming"] is True,
-          "live/start succeeds")
+    # P2 regression: concurrent live/start requests must not create duplicate streams.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _start_live():
+        return http_req("POST", "/api/live/start",
+                        {"fps": 10, "scale": 0.5, "quality": 70})
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        results = list(ex.map(lambda _: _start_live(), range(2)))
+    codes = sorted(r[0] for r in results)
+    check(codes == [200, 409],
+          "concurrent live starts only one succeeds (one 200, one 409)")
+    check(any(r[0] == 200 and r[1].get("ok") for r in results),
+          "concurrent live start leaves exactly one stream running")
 
     try:
         stats_text, jpeg = asyncio.run(recv_live_pair())
@@ -429,7 +484,7 @@ def step_live_snapshot():
         check(status == 200 and body[:6] == b"SIMPLE", "snapshot FITS is downloadable")
         try:
             from astropy.io import fits
-            with fits.open(REPO / "data" / "snapshots" / snap["data"]["file"]) as hdul:
+            with fits.open(DATA_ROOT / "snapshots" / snap["data"]["file"]) as hdul:
                 snap_hdr = hdul[0].header
             for key in ("EXPOSURE", "GAIN", "BLACKLEV", "TEMP",
                         "FRAMETYP", "CAMERA", "SERIAL", "SESSION", "NFRAME"):
@@ -440,14 +495,16 @@ def step_live_snapshot():
                   "snapshot SESSION=SNAPSHOT, NFRAME=1")
         except Exception as exc:  # noqa: BLE001
             check(False, f"snapshot FITS header validation failed: {exc}")
-    _, snap_png = http_req("POST", "/api/snapshot", {"format": "png"})
+    status, snap_png = http_req("POST", "/api/snapshot", {"format": "png"})
+    check(status == 200 and snap_png.get("ok"),
+          "snapshot PNG request succeeds")
     if snap_png.get("ok"):
         status, body = raw_request(snap_png["data"]["url"])
         check(status == 200 and body[:4] == b"\x89PNG", "snapshot PNG is downloadable")
 
     # Snapshot save failure path: 500 is the generic "Internal server error"
     # without leaking PermissionError details.
-    snap_dir = REPO / "data" / "snapshots"
+    snap_dir = DATA_ROOT / "snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
     orig_mode = stat.S_IMODE(snap_dir.stat().st_mode)
     try:
@@ -465,8 +522,8 @@ def step_live_snapshot():
 
 def step_snapshot_folders():
     """v1.4: 绝对 folder + prefix + 文件名恒带时间戳；保留 v1.3 相对单段名与 folders 接口。"""
-    snap_root = (REPO / "data" / "snapshots").resolve()
-    data_root = (REPO / "data").resolve()
+    snap_root = (DATA_ROOT / "snapshots").resolve()
+    data_root = DATA_ROOT.resolve()
     ts_fits_re = r"^\d{8}T\d{2}-\d{2}-\d{2}\.fits$"
 
     status, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
@@ -512,6 +569,20 @@ def step_snapshot_folders():
         check(status == 200 and body[:6] == b"SIMPLE", "subfolder snapshot url downloads (FITS)")
         check(headers.get("cache-control") == "no-store",
               "subfolder snapshot download keeps Cache-Control: no-store")
+
+    # Windows trailing-dot sanitization for relative snapshot folder names.
+    status, snap_dot = http_req("POST", "/api/snapshot",
+                                {"format": "fits", "folder": "trail."})
+    dot = snap_dot.get("data") if snap_dot.get("ok") else {}
+    check(status == 200 and snap_dot.get("ok"),
+          "trailing-dot folder snapshot succeeds")
+    check(dot.get("folder") == str(snap_root / "trail"),
+          "trailing dot is stripped from snapshot folder")
+    check(dot.get("url") == f"/api/files/snapshots/trail/{dot.get('file')}",
+          "trailing-dot folder url uses stripped name")
+    if dot.get("file"):
+        check((snap_root / "trail" / dot["file"]).is_file(),
+              "trailing-dot folder file exists under stripped name")
 
     _, fp = http_req("GET", "/api/snapshot/folders")
     folders = ((fp.get("data") or {}).get("folders") or []) if fp.get("ok") else []
@@ -640,7 +711,9 @@ def step_capture():
           "capture/plan returns plan_id")
     echoed = plan["data"]["phases"]
     check(len(echoed) == 4 and echoed[0]["type"] == "bias"
-          and echoed[1]["exposure_us"] == 3000, "plan echoes and resolves null exposure to current value")
+          and echoed[1]["exposure_us"] == 3000,
+          f"plan echoes and resolves null exposure to current value "
+          f"(dark exposure={echoed[1].get('exposure_us')!r})")
 
     effective = plan["data"].get("session_name")
     EFFECTIVE_SESSION_NAME = effective
@@ -698,6 +771,22 @@ def step_capture():
                            {"session_id": cur["id"]}, expect=409)
         check(not r409.get("ok") and "Capture in progress" in r409.get("error", ""),
               "submitting calibrate during capture returns 409")
+
+    # P2 regression: device/settings lifecycle operations must be rejected while capture is active.
+    _, r409 = http_req("POST", "/api/device/close", expect=409)
+    check(not r409.get("ok") and "Capture in progress" in r409.get("error", ""),
+          "device close during capture returns 409")
+    _, r409 = http_req("POST", "/api/device/open", {"id": "mock-1"}, expect=409)
+    check(not r409.get("ok") and "Capture in progress" in r409.get("error", ""),
+          "device open during capture returns 409")
+    lock_base = Path(tempfile.mkdtemp(prefix="ds-capture-lock-"))
+    lock_root = lock_base / "newroot"
+    _, r409 = http_req("PUT", "/api/settings", {"data_root": str(lock_root)}, expect=409)
+    check(not r409.get("ok") and "Capture in progress" in r409.get("error", ""),
+          "settings switch during capture returns 409")
+    check(not lock_root.exists(),
+          "rejected settings switch during capture creates no new data dir")
+    shutil.rmtree(lock_base, ignore_errors=True)
 
     # Live preview remains available during waiting_user (manual histogram check scenario).
     http_req("POST", "/api/live/start", {"fps": 10, "scale": 0.25, "quality": 60})
@@ -759,6 +848,138 @@ def step_capture():
               "frame_counts are 3 per phase")
 
 
+def step_capture_dir_error():
+    """P2 regression: session-dir creation OSError must move capture state to error, not hang."""
+    default_root = DATA_ROOT.resolve()
+    tmp_base = Path(tempfile.mkdtemp(prefix="ds-capture-ro-"))
+    tmp_root = tmp_base / "ro-data"
+    tmp_root.mkdir()
+    status, r = http_req("PUT", "/api/settings", {"data_root": str(tmp_root)})
+    check(status == 200 and r.get("ok"),
+          "capture-dir-error: switch to temp data root succeeds")
+    captures_dir = tmp_root / "captures"
+    captures_dir.mkdir(exist_ok=True)
+    orig_mode = stat.S_IMODE(captures_dir.stat().st_mode)
+    try:
+        os.chmod(captures_dir, 0o555)
+        status, plan = http_req(
+            "POST", "/api/capture/plan",
+            {"session_name": "RO_ERROR",
+             "phases": [{"type": "bias", "count": 1, "exposure_us": 30}]})
+        check(status == 200 and plan.get("ok"),
+              "capture-dir-error: plan succeeds")
+        _, r = http_req("POST", "/api/capture/start")
+        check(r.get("ok") and r["data"]["status"] == "running",
+              "capture-dir-error: start succeeds")
+        state = poll_state(lambda s: s.get("status") in ("error", "finished"),
+                           timeout=20)
+        check(state.get("status") == "error",
+              "capture-dir-error: session-dir OSError sets state to error")
+        check("Failed to create session directory" in (state.get("message") or ""),
+              "capture-dir-error: error message is descriptive")
+    finally:
+        os.chmod(captures_dir, orig_mode)
+        http_req("PUT", "/api/settings", {"data_root": str(default_root)})
+        shutil.rmtree(tmp_base, ignore_errors=True)
+
+    # Leave capture state finished for the rest of the smoke run.
+    _, plan = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "RO_RECOVER",
+         "phases": [{"type": "bias", "count": 1, "exposure_us": 30}]})
+    check(plan.get("ok"), "capture-dir-error: recovery plan succeeds")
+    _, r = http_req("POST", "/api/capture/start")
+    check(r.get("ok") and r["data"]["status"] == "running",
+          "capture-dir-error: recovery start succeeds")
+    state = poll_state(lambda s: s.get("status") == "finished", timeout=30)
+    check(state.get("status") == "finished",
+          "capture-dir-error: recovery capture finishes")
+
+
+def step_p3_regressions():
+    """P3 regressions: sync abort, thumbnail failure, collision fallback naming."""
+    # 1) Abort must be reflected in capture state synchronously.
+    _, plan = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "ABORT_SYNC",
+         "phases": [{"type": "light", "count": 1, "exposure_us": 3000}]})
+    check(plan.get("ok"), "abort-sync plan succeeds")
+    _, r = http_req("POST", "/api/capture/start")
+    check(r.get("ok") and r["data"]["status"] == "running",
+          "abort-sync start succeeds")
+    wait = poll_state(lambda s: s.get("status") == "waiting_user", timeout=10)
+    check(wait.get("status") == "waiting_user",
+          "abort-sync reaches waiting_user")
+    _, rab = http_req("POST", "/api/capture/abort")
+    check(rab.get("ok") and rab["data"]["status"] == "aborted",
+          "abort returns aborted")
+    _, st = http_req("GET", "/api/capture/state")
+    check(st.get("ok") and st["data"]["status"] == "aborted",
+          "capture state is aborted immediately after abort")
+
+    # 2) Thumbnail failure must not discard a successfully written FITS frame.
+    _, plan = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "THUMB_FAIL",
+         "phases": [{"type": "light", "count": 1, "exposure_us": 3000}]})
+    check(plan.get("ok"), "thumb-fail plan succeeds")
+    eff = (plan.get("data") or {}).get("session_name") or ""
+    _, r = http_req("POST", "/api/capture/start")
+    check(r.get("ok") and r["data"]["status"] == "running",
+          "thumb-fail start succeeds")
+    wait = poll_state(lambda s: s.get("status") == "waiting_user", timeout=10)
+    check(wait.get("status") == "waiting_user",
+          "thumb-fail reaches waiting_user")
+    thumbs_dir = DATA_ROOT / "captures" / eff / "light" / "thumbs"
+    check(thumbs_dir.is_dir(), "thumb-fail thumbs dir exists")
+    orig_mode = stat.S_IMODE(thumbs_dir.stat().st_mode)
+    try:
+        os.chmod(thumbs_dir, 0o555)
+        http_req("POST", "/api/capture/resume")
+        state = poll_state(lambda s: s.get("status") == "finished", timeout=30)
+        check(state.get("status") == "finished",
+              "thumb-fail capture finishes despite thumbnail failure")
+        check(state.get("frames_done") == 1,
+              "thumb-fail FITS frame still counted (frames_done=1)")
+    finally:
+        os.chmod(thumbs_dir, orig_mode)
+
+    # 3) Session-name collision fallback must propagate the actual suffixed id.
+    _, plan = http_req(
+        "POST", "/api/capture/plan",
+        {"session_name": "COLLIDE",
+         "phases": [{"type": "bias", "count": 1, "exposure_us": 3000}]})
+    check(plan.get("ok"), "collision plan succeeds")
+    eff = (plan.get("data") or {}).get("session_name") or ""
+    blocker = DATA_ROOT / "captures" / eff
+    blocker.mkdir(parents=True, exist_ok=True)
+    try:
+        _, r = http_req("POST", "/api/capture/start")
+        check(r.get("ok") and r["data"]["status"] == "running",
+              "collision start succeeds")
+        state = poll_state(lambda s: s.get("status") == "finished", timeout=30)
+        check(state.get("status") == "finished",
+              "collision capture finishes")
+        actual = state.get("session_name") or ""
+        check(actual != eff and actual.startswith(eff + "_"),
+              "collision fallback session_name includes suffix")
+        _, sess = http_req("GET", "/api/sessions")
+        match = next((s for s in sess.get("data", [])
+                      if s.get("id") == actual), None)
+        check(match is not None and match.get("name") == actual,
+              "collision fallback session list id/name match")
+        meta_path = DATA_ROOT / "captures" / actual / "meta.json"
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            check(meta.get("id") == actual and meta.get("name") == actual,
+                  "collision fallback meta id/name match")
+        else:
+            check(False, "collision fallback meta.json exists")
+    finally:
+        # The blocker directory is inside the temporary smoke data root.
+        pass
+
+
 def step_session_files():
     _, detail = http_req("GET", f"/api/sessions/{SESSION_ID}")
     d = detail["data"]
@@ -781,7 +1002,7 @@ def step_session_files():
           "GET /api/files response has Cache-Control: no-store")
     try:
         from astropy.io import fits
-        with fits.open(REPO / "data" / "captures" / SESSION_ID
+        with fits.open(DATA_ROOT / "captures" / SESSION_ID
                        / "bias" / f0["file"]) as hdul:
             hdr = hdul[0].header
             data = hdul[0].data
@@ -820,9 +1041,20 @@ def step_processing():
           and "does not exist" in bad.get("error", ""),
           "excluding a nonexistent file returns 400 (English error)")
 
-    _, r = http_req("POST", "/api/process/calibrate",
-                    {"session_id": SESSION_ID, "sigma": 3, "method": "mean"})
-    job_id = r["data"]["job_id"]
+    # P2 regression: concurrent calibrate jobs for the same session must not race.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _submit_calibrate():
+        return http_req("POST", "/api/process/calibrate",
+                        {"session_id": SESSION_ID, "sigma": 3, "method": "mean"})
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        cal_results = list(ex.map(lambda _: _submit_calibrate(), range(2)))
+    cal_codes = sorted(r[0] for r in cal_results)
+    check(cal_codes == [200, 409],
+          "concurrent calibrate jobs for same session only one accepted")
+    ok_cal = next(r for r in cal_results if r[0] == 200)
+    job_id = ok_cal[1]["data"]["job_id"]
     job = poll_job(job_id)
     check(job["status"] == "done", f"calibrate done ({job.get('message')})")
     check(job.get("progress") == 100, "calibrate progress == 100")
@@ -857,7 +1089,8 @@ def step_processing():
               "background_std", "excluded_counts"):
         check(k in qc, f"qc_report contains {k}")
     check(qc.get("frames") == 2 and qc.get("total_exposure_us") == 6000,
-          "qc: frames=2 and total_exposure_us=6000 after excluding one light")
+          f"qc: frames=2 and total_exposure_us=6000 after excluding one light "
+          f"(actual frames={qc.get('frames')!r}, total_exposure_us={qc.get('total_exposure_us')!r})")
     check((qc.get("excluded_counts") or {}).get("light") == 1,
           "qc.excluded_counts.light == 1")
     check((res.get("excluded_counts") or {}).get("light") == 1,
@@ -866,7 +1099,7 @@ def step_processing():
     # STACK is float32 (BITPIX=-32).
     try:
         from astropy.io import fits
-        with fits.open(REPO / "data" / "captures" / SESSION_ID
+        with fits.open(DATA_ROOT / "captures" / SESSION_ID
                        / "results" / "STACK_sigma3.fits") as hdul:
             stack_bitpix = hdul[0].header.get("BITPIX")
             stack_data = hdul[0].data
@@ -891,6 +1124,30 @@ def step_processing():
         status, body = raw_request(sres["url"])
         check(status == 200 and body[:6] == b"SIMPLE", "stretched result FITS downloadable")
 
+    # P1 regression: re-running calibrate with a different exclude must clear old
+    # calibrated/*.fits so _run_stack cannot consume stale CAL files.
+    _, r = http_req("POST", "/api/process/calibrate",
+                    {"session_id": SESSION_ID, "sigma": 3, "method": "mean",
+                     "exclude": {"bias": [], "dark": [], "flat": [],
+                                 "light": ["LIGHT_0001.fits"]}})
+    job_id = r["data"]["job_id"]
+    job = poll_job(job_id)
+    check(job["status"] == "done", "rerun calibrate with different exclude done")
+    check((job.get("result") or {}).get("calibrated_count") == 2,
+          "rerun calibrate writes only 2 calibrated frames (LIGHT_0001 excluded)")
+    cal_dir = DATA_ROOT / "captures" / SESSION_ID / "calibrated"
+    check(not (cal_dir / "CAL_0003.fits").exists(),
+          "rerun calibrate removes stale CAL_0003.fits from previous run")
+
+    _, r = http_req("POST", "/api/process/stack",
+                    {"session_id": SESSION_ID, "sigma": 3, "method": "mean"})
+    job_id = r["data"]["job_id"]
+    job = poll_job(job_id)
+    check(job["status"] == "done", "stack after rerun calibrate done")
+    qc2 = ((job.get("result") or {}).get("qc") or {})
+    check(qc2.get("frames") == 2,
+          "stack after rerun calibrate uses 2 frames, not stale CAL_0003")
+
     _, detail = http_req("GET", f"/api/sessions/{SESSION_ID}")
     d = detail["data"]
     check(len(d["results"]) >= 2, "session detail results >= 2 (stack + stretched result)")
@@ -898,29 +1155,70 @@ def step_processing():
           "session detail returns qc_report (frames=2, includes excluded_counts)")
 
 
+def step_live_error():
+    """P2 regression: persistent live grab failure must stop and expose an error."""
+    status, r = http_req("POST", "/api/live/start",
+                         {"fps": 10, "scale": 0.5, "quality": 70})
+    check(status == 200 and r.get("ok") and r["data"]["streaming"] is True,
+          "live error test: start succeeds")
+    http_req("POST", "/api/device/close")
+    deadline = time.time() + 10
+    live_state = None
+    while time.time() < deadline:
+        _, live_state = http_req("GET", "/api/live/state")
+        data = live_state.get("data") or {}
+        if live_state.get("ok") and data.get("streaming") is False \
+                and data.get("error"):
+            break
+        time.sleep(0.1)
+    check(live_state is not None and live_state.get("ok")
+          and (live_state.get("data") or {}).get("streaming") is False
+          and bool((live_state.get("data") or {}).get("error")),
+          "live after device close stops and exposes error state")
+
+
 def main():
-    global BASE, PORT, PROC
+    global BASE, PORT, PROC, DATA_ROOT
     PORT = free_port()
     BASE = f"http://127.0.0.1:{PORT}"
-    print(f"Starting uvicorn subprocess on port {PORT} ...")
-    PROC = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app",
-         "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
-        cwd=BACKEND, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    # Run the whole smoke suite against a temporary data root so user data and
+    # backend/.data_root.json are never part of the test. The persisted settings
+    # file is snapshotted and restored after uvicorn exits.
+    temp_base = Path(tempfile.mkdtemp(prefix="ds-stack-smoke-"))
+    DATA_ROOT = (temp_base / "data").resolve()
+    settings_file = BACKEND / ".data_root.json"
+    original_settings = settings_file.read_bytes() if settings_file.is_file() else None
+
+    env = dict(os.environ)
+    env["DIFF_DATA_ROOT"] = str(DATA_ROOT)
+    print(f"Starting uvicorn subprocess on port {PORT} "
+          f"(temporary data root: {DATA_ROOT}) ...")
+    PROC = None
     try:
+        PROC = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "app.main:app",
+             "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
+            cwd=BACKEND, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         wait_server()
         step_health_devices()
         step_open_properties()
         step_settings()
         step_browse_folders()
         step_chinese_session()
+        step_dotted_session()
         step_live_snapshot()
         step_snapshot_folders()
         step_capture()
+        step_capture_dir_error()
+        step_p3_regressions()
         step_session_files()
         step_processing()
+        step_live_error()
 
-        http_req("POST", "/api/device/close")
+        _, close = http_req("POST", "/api/device/close")
+        check(close.get("ok") and close.get("data", {}).get("connected") is False,
+              "device close succeeds at end of smoke")
         _, r = http_req("GET", "/api/capture/state")
         check(r["data"]["status"] == "finished", "final: state still queryable after device close")
     except Exception as exc:  # noqa: BLE001
@@ -928,11 +1226,21 @@ def main():
         traceback.print_exc()
         check(False, f"self test exception: {exc}")
     finally:
-        PROC.terminate()
+        if PROC is not None:
+            PROC.terminate()
+            try:
+                PROC.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                PROC.kill()
+        # Restore the user's persisted data-root setting exactly as it was.
         try:
-            PROC.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            PROC.kill()
+            if original_settings is None:
+                settings_file.unlink(missing_ok=True)
+            else:
+                settings_file.write_bytes(original_settings)
+        except OSError as exc:  # noqa: BLE001
+            print(f"WARN: failed to restore {settings_file}: {exc}")
+        shutil.rmtree(temp_base, ignore_errors=True)
 
     failed = [m for ok, m in RESULTS if not ok]
     print("\n" + "=" * 60)

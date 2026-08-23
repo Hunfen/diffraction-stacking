@@ -281,7 +281,7 @@ query：`?path=<绝对路径，可空>`
 { "ok": true, "data": {
   "status": "waiting_user",
   "session_name": "20260822T10-00-00_LEED_Si111_001",
-  "current_phase": { "type": "light", "index": 3, "total": 4 },
+  "current_phase": { "type": "light", "index": 4, "total": 4 },
   "frames_done": 110, "total_frames": 210,
   "prompt": "Restore normal diffraction conditions. Check the exposure/gain parameters against the live preview and histogram, then confirm to start the continuous Light capture",
   "message": "",
@@ -313,7 +313,7 @@ query：`?path=<绝对路径，可空>`
 
 ```json
 { "topic": "capture", "data": { "status": "...", "session_name": "20260822T10-00-00_LEED_Si111_001",
-  "current_phase": { "type": "light", "index": 3, "total": 4 },
+  "current_phase": { "type": "light", "index": 4, "total": 4 },
   "frames_done": 111, "total_frames": 210, "prompt": "...", "message": "...",
   "needs_user": true } }
 ```
