@@ -134,6 +134,11 @@ export interface DataDirSettings {
   writable: boolean;
 }
 
+/** POST /api/pick-folder 原生目录选择器响应；path 为 null 表示用户取消 */
+export interface PickFolderResult {
+  path: string | null;
+}
+
 export type CaptureStatus =
   | 'idle'
   | 'running'

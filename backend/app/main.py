@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -35,6 +37,104 @@ from .util import (CONTENT_TYPES, REPO_ROOT, auto_contrast_8bit, ensure_dirs,
 
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 INDEX_HTML = DIST_DIR / "index.html"
+
+
+# =========================================================================
+# 原生文件夹选择对话框（服务器本机）
+# =========================================================================
+PICKER_DEFAULT_TITLE = "Select Folder"
+
+
+def _run_macos_picker(title: str) -> str | None:
+    """macOS: osascript choose folder → POSIX path。取消返回 None。"""
+    safe_title = (title.replace("\\", "\\\\").replace('"', '\\"')
+                  .replace("\r", " ").replace("\n", " "))
+    script = f'POSIX path of (choose folder with prompt "{safe_title}")'
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Unable to launch macOS folder picker: {exc}")
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    logging.getLogger("uvicorn.error").warning(
+        "osascript picker rc=%s stdout=%r stderr=%r",
+        proc.returncode, stdout, stderr)
+    if proc.returncode == 0:
+        return stdout or None
+    # 某些 AppleScript 环境即使选择成功也可能以非零退出，但路径已写入 stdout。
+    if stdout and os.path.isabs(stdout):
+        return stdout
+    stderr_lower = stderr.lower()
+    if proc.returncode == -128 or "-128" in stderr_lower \
+            or "cancel" in stderr_lower or "cancelled" in stderr_lower \
+            or "已取消" in stderr:
+        return None
+    raise RuntimeError(f"macOS folder picker failed: {stderr}")
+
+
+def _run_windows_picker(title: str) -> str | None:
+    """Windows: PowerShell FolderBrowserDialog。取消返回 None。"""
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$f.Description = $env:PICKER_TITLE; "
+        "$f.ShowNewFolderButton = $true; "
+        "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+        "{ Write-Output $f.SelectedPath }"
+    )
+    env = dict(os.environ)
+    env["PICKER_TITLE"] = title
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps],
+            capture_output=True, text=True, timeout=120, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Unable to launch Windows folder picker: {exc}")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Windows folder picker failed: {(proc.stderr or '').strip()}")
+    path = proc.stdout.strip()
+    return path or None
+
+
+def _run_linux_picker(title: str) -> str | None:
+    """Linux: 优先 zenity，其次 kdialog。取消/关闭返回 None。"""
+    candidates = (
+        ["zenity", "--file-selection", "--directory", f"--title={title}"],
+        ["kdialog", "--getexistingdirectory", title],
+    )
+    for cmd in candidates:
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            continue
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return proc.stdout.strip() or None
+        # zenity/kdialog 非零退出通常表示用户取消/关闭对话框。
+        return None
+    raise RuntimeError(
+        "Linux folder picker is not available (install zenity or kdialog)")
+
+
+def _pick_folder(title: str) -> str | None:
+    """按当前平台打开原生目录选择框；返回绝对路径或 None（用户取消）。"""
+    if sys.platform == "darwin":
+        path = _run_macos_picker(title)
+    elif sys.platform.startswith("win"):
+        path = _run_windows_picker(title)
+    elif sys.platform.startswith("linux"):
+        path = _run_linux_picker(title)
+    else:
+        raise RuntimeError(
+            "Native folder picker is not supported on this platform")
+    if path:
+        path = os.path.abspath(path)
+    return path
 
 
 # =========================================================================
@@ -361,6 +461,10 @@ class SettingsBody(BaseModel):
     data_root: str
 
 
+class PickFolderBody(BaseModel):
+    title: str = PICKER_DEFAULT_TITLE
+
+
 class PhaseIn(BaseModel):
     type: str
     count: int = Field(ge=1, le=10000)
@@ -434,6 +538,17 @@ def settings_put(body: SettingsBody):
         raise HTTPException(400, f"Failed to save data directory setting: {exc}")
     return ok({"data_root": str(get_data_root()),
                "writable": is_data_root_writable(root)})
+
+
+@app.post("/api/pick-folder")
+def pick_folder(body: PickFolderBody):
+    """打开服务器本机原生目录选择框（同步 def → FastAPI 线程池执行）。"""
+    title = (body.title or "").strip() or PICKER_DEFAULT_TITLE
+    try:
+        path = _pick_folder(title)
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc))
+    return ok({"path": path, "cancelled": path is None})
 
 
 @app.get("/api/devices")

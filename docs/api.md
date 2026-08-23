@@ -416,6 +416,43 @@ query：`?path=<绝对路径，可空>`
   "status": "running", "progress": 40, "message": "..." } }
 ```
 
+### 2.8 原生文件夹选择（v1.5）
+
+**POST /api/pick-folder** — 在服务器本机打开原生目录选择对话框（同步 `def`，由 FastAPI 线程池执行，不阻塞事件循环）。
+
+body（可选）：
+
+```json
+{ "title": "Select Folder" }
+```
+
+- `title` 缺省为 `"Select Folder"`
+
+成功选择：
+
+```json
+{ "ok": true, "data": { "path": "/Users/me/data", "cancelled": false }, "error": null }
+```
+
+用户取消/关闭对话框：
+
+```json
+{ "ok": true, "data": { "path": null, "cancelled": true }, "error": null }
+```
+
+平台不可用/无法启动选择器（无 GUI、缺少 `osascript`/`powershell`/`zenity`/`kdialog` 等）：
+
+```json
+{ "ok": false, "data": null, "error": "Native folder picker is not available ..." }
+```
+
+HTTP 状态为 **501**。
+
+平台实现：
+- macOS：`osascript` `choose folder`，返回 POSIX 绝对路径
+- Windows：PowerShell `System.Windows.Forms.FolderBrowserDialog`
+- Linux：优先 `zenity --file-selection --directory`，其次 `kdialog --getexistingdirectory`
+
 ---
 
 ## 3. 处理管线与文件格式

@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.0] - 2026-08-24
+
+### Added
+
+- **Native OS folder picker**: new backend endpoint `POST /api/pick-folder` opens the server machine's native folder-selection dialog (macOS `osascript`, Windows PowerShell `FolderBrowserDialog`, Linux `zenity`/`kdialog`).
+- **Settings → Data Directory**: added a `Choose…` button next to the manual path input that uses the native folder picker.
+- **Live → Snapshot (Single Frame)**: `Choose Folder…` now uses the native folder picker; the old in-app `Server Browse…` modal/button was removed.
+- Documented the new endpoint in `docs/api.md`.
+
+### Changed
+
+- Settings page card order is now: Data Directory → Preview Parameters (used by /live) → Backend Address → Backend Health.
+- Folder-picker cancellation is shown as a warning (`Folder selection cancelled`) instead of an error.
+- macOS `osascript` cancellation is now recognized for localized messages (`用户已取消`, `-128`, `cancel`/`cancelled`) and for non-zero exits that still emit a selected path on stdout.
+
 ## [1.4.1] - 2026-08-24
 
 ### Fixed

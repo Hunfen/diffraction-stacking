@@ -16,12 +16,10 @@ import {
   Empty,
   Input,
   InputNumber,
-  Modal,
   Row,
   Select,
   Slider,
   Space,
-  Spin,
   Statistic,
   Switch,
   Tag,
@@ -29,23 +27,20 @@ import {
   message,
 } from 'antd';
 import {
-  ArrowUpOutlined,
   CameraOutlined,
   FolderOpenOutlined,
-  FolderOutlined,
   LinkOutlined,
 } from '@ant-design/icons';
-import { AxiosError } from 'axios';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { apiGet, apiPost, apiPut } from '../api/client';
 import { resolveUrl } from '../api/backend';
 import { getPreviewSettings } from '../api/settings';
 import { useReconnectingWebSocket, type WsStatus } from '../api/ws';
 import type {
-  BrowseFoldersData,
   CameraProperty,
   DataDirSettings,
   LiveStats,
+  PickFolderResult,
   PropertiesData,
   PropertyPutResult,
   SnapshotResult,
@@ -73,20 +68,6 @@ function runLiveAction(action: () => Promise<void>): Promise<void> {
 /** data_root → 默认快照目录 <data_root>/snapshots。 */
 function defaultSnapshotFolder(dataRoot: string): string {
   return `${dataRoot.replace(/\/+$/, '')}/snapshots`;
-}
-
-/** 从 api client 的两种错误形态提取后端英文错误文本：
- *  - ApiError（ok:false 信封）：message 即后端 error；
- *  - AxiosError（FastAPI HTTPException 的 {"detail": ...}）：读取 detail。
- */
-function browseErrorMessage(err: unknown): string {
-  if (err instanceof AxiosError) {
-    const body = err.response?.data as { error?: unknown; detail?: unknown } | undefined;
-    if (typeof body?.error === 'string' && body.error) return body.error;
-    if (typeof body?.detail === 'string' && body.detail) return body.detail;
-    if (body?.detail) return JSON.stringify(body.detail);
-  }
-  return err instanceof Error && err.message ? err.message : 'Failed to load folders.';
 }
 
 const statusMeta: Record<WsStatus, { color: string; text: string }> = {
@@ -462,6 +443,7 @@ export default function LivePage() {
   const [snapshotFormat, setSnapshotFormat] = useState<'fits' | 'tiff' | 'png'>('fits');
   const [snapshot, setSnapshot] = useState<SnapshotResult | null>(null);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [folderPicking, setFolderPicking] = useState(false);
   // 已选快照目录（绝对路径）。localStorage 记住上次选择；无记忆（null/空串）时用 /api/settings 的 data_root + /snapshots。
   const [snapshotFolder, setSnapshotFolder] = useState<string | null>(
     () => localStorage.getItem(SNAPSHOT_FOLDER_KEY) || null,
@@ -470,12 +452,6 @@ export default function LivePage() {
   const [snapshotPrefix, setSnapshotPrefix] = useState<string>(
     () => localStorage.getItem(SNAPSHOT_PREFIX_KEY) ?? '',
   );
-  // v1.4 目录选择器（/api/browse/folders）
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
-  const [browseFolders, setBrowseFolders] = useState<BrowseFoldersData | null>(null);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseError, setBrowseError] = useState<string | null>(null);
-
   // 顶部提示：内存态 dismissed；出现任何警告时自动复显
   const [alertDismissed, setAlertDismissed] = useState(false);
 
@@ -636,44 +612,25 @@ export default function LivePage() {
     };
   }, []);
 
-  /** GET /api/browse/folders：无 path → data_root；带 path → 进入该目录。错误就地展示，不弹全局 toast。 */
-  const fetchBrowseFolders = useCallback(async (path?: string) => {
-    setBrowseLoading(true);
-    setBrowseError(null);
+  const pickSnapshotFolder = async () => {
+    setFolderPicking(true);
     try {
-      const query = path ? `?path=${encodeURIComponent(path)}` : '';
-      const data = await apiGet<BrowseFoldersData>(`/api/browse/folders${query}`, { silent: true });
-      setBrowseFolders({
-        path: data.path,
-        parent: data.parent ?? null,
-        files: Array.isArray(data.files) ? data.files : [],
-        folders: Array.isArray(data.folders) ? data.folders : [],
-      });
+      const result = await apiPost<PickFolderResult>(
+        '/api/pick-folder',
+        { title: 'Select Snapshot Folder' },
+        { silent: true },
+      );
+      if (result.path) {
+        setSnapshotFolder(result.path);
+        localStorage.setItem(SNAPSHOT_FOLDER_KEY, result.path);
+      } else {
+        message.warning('Folder selection cancelled');
+      }
     } catch (err) {
-      setBrowseError(browseErrorMessage(err));
+      message.error(err instanceof Error ? err.message : 'Unable to open native folder picker');
     } finally {
-      setBrowseLoading(false);
+      setFolderPicking(false);
     }
-  }, []);
-
-  const openFolderPicker = () => {
-    setBrowseFolders(null);
-    setFolderPickerOpen(true);
-    void fetchBrowseFolders();
-  };
-
-  const closeFolderPicker = () => setFolderPickerOpen(false);
-
-  const useCurrentFolder = () => {
-    if (!browseFolders) return;
-    setSnapshotFolder(browseFolders.path);
-    localStorage.setItem(SNAPSHOT_FOLDER_KEY, browseFolders.path);
-    closeFolderPicker();
-  };
-
-  const browseUp = () => {
-    if (!browseFolders?.parent) return;
-    void fetchBrowseFolders(browseFolders.parent);
   };
 
   const takeSnapshot = async () => {
@@ -939,7 +896,11 @@ export default function LivePage() {
             <Card size="small" title="Snapshot (Single Frame)">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <div>
-                  <Button icon={<FolderOpenOutlined />} onClick={openFolderPicker}>
+                  <Button
+                    icon={<FolderOpenOutlined />}
+                    loading={folderPicking}
+                    onClick={() => void pickSnapshotFolder()}
+                  >
                     Choose Folder…
                   </Button>
                   <div style={{ marginTop: 4 }}>
@@ -1080,63 +1041,6 @@ export default function LivePage() {
           </Card>
         </Col>
       </Row>
-
-      <Modal
-        title="Choose Snapshot Folder"
-        open={folderPickerOpen}
-        onCancel={closeFolderPicker}
-        width={520}
-        footer={[
-          <Button
-            key="up"
-            icon={<ArrowUpOutlined />}
-            disabled={!browseFolders?.parent || browseLoading}
-            onClick={browseUp}
-          >
-            Up
-          </Button>,
-          <Button key="cancel" onClick={closeFolderPicker}>
-            Cancel
-          </Button>,
-          <Button
-            key="use"
-            type="primary"
-            disabled={!browseFolders || browseLoading}
-            onClick={useCurrentFolder}
-          >
-            Use This Folder
-          </Button>,
-        ]}
-      >
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Typography.Text code style={{ wordBreak: 'break-all' }}>
-            {browseFolders?.path ?? 'Loading…'}
-          </Typography.Text>
-          {browseError && <Alert type="error" showIcon message={browseError} />}
-          <Spin spinning={browseLoading}>
-            {browseFolders && browseFolders.folders.length === 0 ? (
-              <Empty description="No subfolders" />
-            ) : (
-              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
-                <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                  {(browseFolders?.folders ?? []).map((folder) => (
-                    <Button
-                      key={folder.path}
-                      type="text"
-                      block
-                      icon={<FolderOutlined />}
-                      style={{ textAlign: 'left' }}
-                      onClick={() => void fetchBrowseFolders(folder.path)}
-                    >
-                      {folder.name}
-                    </Button>
-                  ))}
-                </Space>
-              </div>
-            )}
-          </Spin>
-        </Space>
-      </Modal>
     </Space>
   );
 }

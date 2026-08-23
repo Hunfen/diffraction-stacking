@@ -18,10 +18,11 @@ import {
   CheckCircleOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
+  FolderOpenOutlined,
   ReloadOutlined,
   SaveOutlined,
 } from '@ant-design/icons';
-import { apiGet, apiPut } from '../api/client';
+import { apiGet, apiPost, apiPut } from '../api/client';
 import { clearBackend, DEFAULT_BACKEND, getBackend, normalizeBackend, setBackend } from '../api/backend';
 import {
   DEFAULT_PREVIEW,
@@ -30,7 +31,7 @@ import {
   setPreviewSettings,
   type PreviewSettings,
 } from '../api/settings';
-import type { DataDirSettings, HealthInfo } from '../api/types';
+import type { DataDirSettings, HealthInfo, PickFolderResult } from '../api/types';
 
 type HealthStatus = 'checking' | 'ok' | 'error';
 
@@ -44,6 +45,7 @@ export default function SettingsPage() {
   const [dataRootInput, setDataRootInput] = useState('');
   const [dataDirLoading, setDataDirLoading] = useState(true);
   const [dataDirSaving, setDataDirSaving] = useState(false);
+  const [dataDirPicking, setDataDirPicking] = useState(false);
   const [dataDirError, setDataDirError] = useState('');
 
   const loadDataDir = useCallback(async () => {
@@ -79,6 +81,27 @@ export default function SettingsPage() {
       setDataDirError(err instanceof Error ? err.message : 'Failed to save. Please check the error returned by the backend');
     } finally {
       setDataDirSaving(false);
+    }
+  };
+
+  const pickDataDir = async () => {
+    setDataDirPicking(true);
+    setDataDirError('');
+    try {
+      const result = await apiPost<PickFolderResult>(
+        '/api/pick-folder',
+        { title: 'Select Data Directory' },
+        { silent: true },
+      );
+      if (result.path) {
+        setDataRootInput(result.path);
+      } else {
+        message.warning('Folder selection cancelled');
+      }
+    } catch (err) {
+      setDataDirError(err instanceof Error ? err.message : 'Unable to open native folder picker');
+    } finally {
+      setDataDirPicking(false);
     }
   };
 
@@ -131,52 +154,6 @@ export default function SettingsPage() {
       <Card
         title={
           <Space>
-            <CloudServerOutlined />
-            Backend Address
-          </Space>
-        }
-      >
-        <Row gutter={16} align="middle">
-          <Col flex="auto">
-            <Input
-              size="large"
-              value={backendInput}
-              onChange={(e) => setBackendInput(e.target.value)}
-              placeholder={DEFAULT_BACKEND}
-              addonBefore="HTTP"
-            />
-          </Col>
-          <Col>
-            <Space>
-              <Button type="primary" icon={<SaveOutlined />} onClick={saveBackend}>
-                Save (persisted in localStorage)
-              </Button>
-              <Button
-                onClick={() => {
-                  // 恢复默认 = 清除 localStorage 覆盖，让 VITE_BACKEND env / 默认值按优先级自然生效
-                  clearBackend();
-                  const effective = getBackend();
-                  setBackendInput(effective);
-                  message.success(`Local backend override cleared. Effective address: ${effective}`);
-                  void checkHealth(effective);
-                }}
-              >
-                Restore Default (does not clear env injection)
-              </Button>
-            </Space>
-          </Col>
-        </Row>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          Effective address: {getBackend()}. In dev mode REST requests go through the Vite proxy (target determined
-          at startup by VITE_BACKEND / the default localhost:8000); the WS live stream and image/file URLs use the
-          address saved here directly, so changes take effect immediately. In production, FastAPI serves frontend/dist
-          and everything is same-origin.
-        </Typography.Paragraph>
-      </Card>
-
-      <Card
-        title={
-          <Space>
             <DatabaseOutlined />
             Data Directory
           </Space>
@@ -195,6 +172,13 @@ export default function SettingsPage() {
           </Col>
           <Col>
             <Space>
+              <Button
+                icon={<FolderOpenOutlined />}
+                loading={dataDirPicking}
+                onClick={() => void pickDataDir()}
+              >
+                Choose…
+              </Button>
               <Button
                 type="primary"
                 icon={<SaveOutlined />}
@@ -230,41 +214,6 @@ export default function SettingsPage() {
           After changing, new captures are written to the new directory while old data stays in the original
           directory. A successful save is confirmed by the data_root / writable values returned from PUT /api/settings;
           an invalid path or directory creation failure returns a 400 error from the backend.
-        </Typography.Paragraph>
-      </Card>
-
-      <Card title="Backend Health">
-        <Space style={{ marginBottom: 12 }}>
-          <Badge
-            status={healthStatus === 'ok' ? 'success' : healthStatus === 'error' ? 'error' : 'processing'}
-            text={healthStatus === 'ok' ? 'Healthy' : healthStatus === 'error' ? 'Unhealthy / Unreachable' : 'Checking…'}
-          />
-          <Button icon={<ReloadOutlined />} onClick={() => void checkHealth()}>
-            Recheck
-          </Button>
-        </Space>
-        {healthStatus === 'ok' && health ? (
-          <Descriptions bordered size="small" column={2}>
-            <Descriptions.Item label="status">
-              <Tag color="green" icon={<CheckCircleOutlined />}>
-                {health.status}
-              </Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="version">{health.version}</Descriptions.Item>
-            <Descriptions.Item label="platform">{health.platform}</Descriptions.Item>
-            <Descriptions.Item label="camera_driver">
-              <Tag color={health.camera_driver === 'ic4' ? 'blue' : 'gold'}>{health.camera_driver}</Tag>
-            </Descriptions.Item>
-          </Descriptions>
-        ) : (
-          healthStatus === 'error' && (
-            <Alert type="error" showIcon message="Backend health check failed" description={healthError || 'Unable to connect'} />
-          )
-        )}
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          The health check directly requests "backend address + /api/health". If the browser reports CORS errors in
-          dev, make sure the backend allows cross-origin requests or use a backend address matching the Vite proxy
-          target.
         </Typography.Paragraph>
       </Card>
 
@@ -312,6 +261,87 @@ export default function SettingsPage() {
         <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
           Defaults: fps={DEFAULT_PREVIEW.fps}, quality={DEFAULT_PREVIEW.quality}, scale={DEFAULT_PREVIEW.scale}.
           These parameters are sent to the backend via POST /api/live/start when entering /live.
+        </Typography.Paragraph>
+      </Card>
+
+      <Card
+        title={
+          <Space>
+            <CloudServerOutlined />
+            Backend Address
+          </Space>
+        }
+      >
+        <Row gutter={16} align="middle">
+          <Col flex="auto">
+            <Input
+              size="large"
+              value={backendInput}
+              onChange={(e) => setBackendInput(e.target.value)}
+              placeholder={DEFAULT_BACKEND}
+              addonBefore="HTTP"
+            />
+          </Col>
+          <Col>
+            <Space>
+              <Button type="primary" icon={<SaveOutlined />} onClick={saveBackend}>
+                Save (persisted in localStorage)
+              </Button>
+              <Button
+                onClick={() => {
+                  // 恢复默认 = 清除 localStorage 覆盖，让 VITE_BACKEND env / 默认值按优先级自然生效
+                  clearBackend();
+                  const effective = getBackend();
+                  setBackendInput(effective);
+                  message.success(`Local backend override cleared. Effective address: ${effective}`);
+                  void checkHealth(effective);
+                }}
+              >
+                Restore Default (does not clear env injection)
+              </Button>
+            </Space>
+          </Col>
+        </Row>
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+          Effective address: {getBackend()}. In dev mode REST requests go through the Vite proxy (target determined
+          at startup by VITE_BACKEND / the default localhost:8000); the WS live stream and image/file URLs use the
+          address saved here directly, so changes take effect immediately. In production, FastAPI serves frontend/dist
+          and everything is same-origin.
+        </Typography.Paragraph>
+      </Card>
+
+      <Card title="Backend Health">
+        <Space style={{ marginBottom: 12 }}>
+          <Badge
+            status={healthStatus === 'ok' ? 'success' : healthStatus === 'error' ? 'error' : 'processing'}
+            text={healthStatus === 'ok' ? 'Healthy' : healthStatus === 'error' ? 'Unhealthy / Unreachable' : 'Checking…'}
+          />
+          <Button icon={<ReloadOutlined />} onClick={() => void checkHealth()}>
+            Recheck
+          </Button>
+        </Space>
+        {healthStatus === 'ok' && health ? (
+          <Descriptions bordered size="small" column={2}>
+            <Descriptions.Item label="status">
+              <Tag color="green" icon={<CheckCircleOutlined />}>
+                {health.status}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="version">{health.version}</Descriptions.Item>
+            <Descriptions.Item label="platform">{health.platform}</Descriptions.Item>
+            <Descriptions.Item label="camera_driver">
+              <Tag color={health.camera_driver === 'ic4' ? 'blue' : 'gold'}>{health.camera_driver}</Tag>
+            </Descriptions.Item>
+          </Descriptions>
+        ) : (
+          healthStatus === 'error' && (
+            <Alert type="error" showIcon message="Backend health check failed" description={healthError || 'Unable to connect'} />
+          )
+        )}
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+          The health check directly requests "backend address + /api/health". If the browser reports CORS errors in
+          dev, make sure the backend allows cross-origin requests or use a backend address matching the Vite proxy
+          target.
         </Typography.Paragraph>
       </Card>
     </Space>

@@ -1177,6 +1177,74 @@ def step_live_error():
           "live after device close stops and exposes error state")
 
 
+def step_pick_folder_unit():
+    """Unit-level check for /api/pick-folder non-GUI paths (no dialog opened)."""
+    import sys as _sys
+    from unittest.mock import patch
+
+    if str(BACKEND) not in _sys.path:
+        _sys.path.insert(0, str(BACKEND))
+    import app.main as m
+
+    if _sys.platform == "darwin":
+        runner = "_run_macos_picker"
+    elif _sys.platform.startswith("win"):
+        runner = "_run_windows_picker"
+    else:
+        runner = "_run_linux_picker"
+
+    with patch.object(m, runner, return_value="/tmp/selected"):
+        check(m._pick_folder("Select") == "/tmp/selected",
+              "folder picker unit: selected path is returned")
+    with patch.object(m, runner, return_value=None):
+        check(m._pick_folder("Select") is None,
+              "folder picker unit: cancel returns None")
+    with patch.object(m, runner, side_effect=RuntimeError("no GUI")):
+        try:
+            m._pick_folder("Select")
+        except RuntimeError as exc:
+            check("no GUI" in str(exc),
+                  "folder picker unit: unavailable picker raises RuntimeError")
+        else:
+            check(False,
+                  "folder picker unit: unavailable picker raises RuntimeError")
+
+    # macOS osascript parsing: rc=0, rc!=0 with stdout path, cancel, real error.
+    from types import SimpleNamespace
+
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=0, stdout="/tmp/selected\n", stderr="")):
+        check(m._run_macos_picker("Select") == "/tmp/selected",
+              "osascript unit: rc=0 stdout path is returned")
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=1, stdout="/tmp/selected\n", stderr="some warning")):
+        check(m._run_macos_picker("Select") == "/tmp/selected",
+              "osascript unit: rc!=0 with absolute stdout path is returned")
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=1, stdout="", stderr="User canceled.")):
+        check(m._run_macos_picker("Select") is None,
+              "osascript unit: cancel stderr returns None")
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="15:64: execution error: 用户已取消。 (-128)")):
+        check(m._run_macos_picker("Select") is None,
+              "osascript unit: Chinese cancel stderr returns None")
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=-128, stdout="", stderr="")):
+        check(m._run_macos_picker("Select") is None,
+              "osascript unit: rc=-128 returns None")
+    with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
+            returncode=1, stdout="", stderr="Not authorized")):
+        try:
+            m._run_macos_picker("Select")
+        except RuntimeError as exc:
+            check("Not authorized" in str(exc),
+                  "osascript unit: error stderr raises RuntimeError")
+        else:
+            check(False,
+                  "osascript unit: error stderr raises RuntimeError")
+
+
 def main():
     global BASE, PORT, PROC, DATA_ROOT
     PORT = free_port()
@@ -1196,6 +1264,7 @@ def main():
           f"(temporary data root: {DATA_ROOT}) ...")
     PROC = None
     try:
+        step_pick_folder_unit()
         PROC = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "app.main:app",
              "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
