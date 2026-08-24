@@ -303,6 +303,15 @@ class CaptureService:
             if self._resume_event.wait(timeout=0.1):
                 return True
 
+    def _optional_property(self, name: str, default=0.0):
+        """读取可选相机属性；某些真机属性（如 device_temperature）可能不存在
+        或返回非有限值（inf/nan），不应让一帧/整个拍摄因此失败。"""
+        try:
+            return self.camera.get_property(name)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Skipping property {name}: {exc}")
+            return default
+
     def _capture_phase(self, phase: dict, ptype: str) -> bool:
         session_dir = self._session_dir
         group_dir = session_dir / ptype
@@ -326,7 +335,9 @@ class CaptureService:
                 exposure = self.camera.get_property("exposure")
                 gain = self.camera.get_property("gain")
                 black = self.camera.get_property("black_level")
-                temp = self.camera.get_property("device_temperature")
+                # device_temperature 不是所有真机都稳定提供；缺失/非有限值时
+                # 用默认值写入 FITS 头，不把整帧判为失败。
+                temp = self._optional_property("device_temperature", 0.0)
                 cam = self.camera.device
                 try:
                     self._save_fits(group_dir / f"{name}.fits", frame, stats,
