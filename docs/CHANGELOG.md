@@ -12,7 +12,7 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - **Mock camera sensor ranges**: `width` min/step is now 480/16 px and `height` min/step is now 4/4 px, matching the DMK 33GX249e technical manual; offsets now use a step of 4 px.
-- **Histogram**: the live histogram is now computed from the **JPEG-decoded 8-bit preview** — the exact byte stream the browser receives — and is a fixed 0–255, 256-bin histogram. This fixes cases where the pre-JPEG auto-contrast array was quantized to a few levels (e.g. only 0/255) while the displayed JPEG still showed many gray levels.
+- **Histogram**: the live histogram is now computed directly from the **raw 12-bit frame** returned by `grab_frame()`. It is a fixed 256-bin histogram where bin 0–255 maps to ADU 0–4095 (16 ADU per bin); it no longer uses the auto-contrast/JPEG preview, so short exposures are no longer quantized into a few misleading bars.
 - **Manual exposure/gain overrides auto**: on the mock camera, setting `exposure`/`gain` while the corresponding auto function is enabled disables that auto function, mirroring real camera behavior.
 - Changelog moved to `docs/CHANGELOG.md`.
 - **Run launcher**: `scripts/run.ps1` / `scripts/run.sh` now detect an already-running backend on the chosen port and reuse it instead of exiting with EADDRINUSE/WinError 10048; they also print the actual access URLs including the machine's LAN IPv4 addresses, and warn when the running backend is still serving an older version than the repository.

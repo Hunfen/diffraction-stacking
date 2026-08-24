@@ -202,9 +202,15 @@ def frame_stats(frame: np.ndarray) -> dict:
     }
 
 
-def histogram_256(img8: np.ndarray) -> list[int]:
-    """Fixed 256-bin histogram of the 8-bit preview image (values 0..255)."""
-    counts = np.bincount(np.asarray(img8, dtype=np.uint8).ravel(), minlength=256)
+def histogram_256(raw12: np.ndarray) -> list[int]:
+    """Fixed 256-bin histogram of the raw 12-bit frame (values 0..4095).
+
+    Bin i covers raw ADU range [i*16, (i+1)*16 - 1]; i.e. the full 0..4095
+    sensor range is divided evenly into 256 bins. Values outside 0..4095 are
+    ignored.
+    """
+    arr = np.asarray(raw12)
+    counts = np.histogram(arr, bins=256, range=(0, 4096))[0]
     return [int(v) for v in counts]
 
 

@@ -1100,7 +1100,7 @@ export default function LivePage() {
                       <Statistic title="FPS" value={stats.fps} precision={1} />
                     </Col>
                   </Row>
-                  <Divider style={{ margin: '12px 0' }}>Histogram (8-bit preview · 256 bins)</Divider>
+                  <Divider style={{ margin: '12px 0' }}>Histogram (raw 12-bit · 256 bins · 0–4095)</Divider>
                   <div style={{ height: 180 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={histogramData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
