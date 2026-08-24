@@ -57,9 +57,13 @@ PY
   printf '\n'
 }
 
+# Repository version (from backend/app/__init__.py), used to detect a stale
+# backend process that is still serving the previous version of the code.
+repo_version="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$BACKEND_DIR/app/__init__.py" | head -n 1)"
+
 # If something is already listening on the chosen port, check whether it is
 # this backend. If it is healthy, reuse it instead of failing with EADDRINUSE.
-if "$VENV_PYTHON" - "$PORT" <<'PY'
+health_info="$("$VENV_PYTHON" - "$PORT" <<'PY' 2>/dev/null || true
 import json
 import sys
 import urllib.request
@@ -68,12 +72,29 @@ port = sys.argv[1]
 try:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as resp:
         data = json.load(resp)
-    sys.exit(0 if data.get("ok") is True else 1)
+    if data.get("ok") is True:
+        version = data.get("data", {}).get("version", "")
+        camera = data.get("data", {}).get("camera_driver", "")
+        print(f"{version}|{camera}")
+        sys.exit(0)
 except Exception:
-    sys.exit(1)
+    pass
+sys.exit(1)
 PY
-then
-  printf '\033[1;32m[run]\033[0m Backend is already running on port %s.\n' "$PORT"
+)"
+
+if [[ -n "$health_info" ]]; then
+  backend_version="${health_info%%|*}"
+  backend_camera="${health_info#*|}"
+
+  if [[ -n "$repo_version" && -n "$backend_version" && "$backend_version" != "$repo_version" ]]; then
+    printf '\033[1;33m[run]\033[0m A backend is already running on port %s, but its version is %s while the repository version is %s.\n' "$PORT" "$backend_version" "$repo_version"
+    printf '\033[1;33m[run]\033[0m It is still serving the old code. Stop it, then run this script again.\n'
+    print_urls "$PORT"
+    exit 1
+  fi
+
+  printf '\033[1;32m[run]\033[0m Backend is already running on port %s (version %s, camera_driver=%s).\n' "$PORT" "$backend_version" "$backend_camera"
   print_urls "$PORT"
   exit 0
 fi

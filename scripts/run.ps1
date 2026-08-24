@@ -66,6 +66,21 @@ function Write-Urls {
     Write-Host ''
 }
 
+# Repository version (from backend/app/__init__.py), used to detect a stale
+# backend process that is still serving the previous version of the code.
+$repoVersion = ''
+$initFile = Join-Path $BackendDir 'app\__init__.py'
+if (Test-Path $initFile) {
+    try {
+        $initContent = Get-Content -Raw -Path $initFile
+        if ($initContent -match 'APP_VERSION\s*=\s*"([^"]+)"') {
+            $repoVersion = $Matches[1]
+        }
+    } catch {
+        $repoVersion = ''
+    }
+}
+
 # If something is already listening on the chosen port, check whether it is
 # this backend. If it is healthy, reuse it instead of failing with WinError 10048.
 $existingConnections = @()
@@ -92,6 +107,13 @@ if ($existingConnections.Count -gt 0) {
     }
 
     if ($alreadyRunning) {
+        if ($repoVersion -and $backendVersion -and ($backendVersion -ne $repoVersion)) {
+            Write-Host "[run][WARN] A backend is already running on port $Port, but its version is $backendVersion while the repository version is $repoVersion." -ForegroundColor Yellow
+            Write-Host '[run][WARN] It is still serving the old code. Stop it (close its terminal / kill the process), then run this script again.' -ForegroundColor Yellow
+            Write-Urls -ListenPort $Port
+            exit 1
+        }
+
         Write-Host "[run] Backend is already running on port $Port (version $backendVersion, camera_driver=$backendCamera)." -ForegroundColor Green
         Write-Urls -ListenPort $Port
         exit 0
