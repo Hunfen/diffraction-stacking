@@ -44,9 +44,22 @@ cd static-astrophoto
 
 安装脚本会自动创建 Python 虚拟环境、安装后端依赖、构建前端并创建数据目录，可安全重复执行。
 
+已有安装需要更新到最新代码时，可使用：
+
+- **Windows**：`.\scripts\update.ps1`；真机模式加 `-WithCamera`
+- **macOS / Linux / WSL**：`./scripts/update.sh`；真机模式加 `--with-camera`
+
+更新脚本会以 fast-forward 拉取 `main`，刷新后端依赖并重新构建前端。
+
 ## 运行
 
-**macOS / Linux / WSL**（Mock 相机）：
+**macOS / Linux / WSL**：
+
+```bash
+./scripts/run.sh
+```
+
+或手动启动（Mock 相机）：
 
 ```bash
 cd backend
@@ -54,6 +67,12 @@ cd backend
 ```
 
 **Windows**：
+
+```powershell
+.\scripts\run.ps1
+```
+
+或手动启动：
 
 ```powershell
 cd backend

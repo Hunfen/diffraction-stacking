@@ -46,9 +46,22 @@ cd static-astrophoto
 The installer creates the Python virtual environment, installs backend dependencies, builds the frontend,
 and creates the data directories. It is safe to re-run.
 
+To update an existing installation to the latest code:
+
+- **Windows**: `.\scripts\update.ps1`; add `-WithCamera` for real-camera mode
+- **macOS / Linux / WSL**: `./scripts/update.sh`; add `--with-camera` for real-camera mode
+
+The updater fast-forwards to `main`, refreshes backend dependencies, and rebuilds the frontend.
+
 ## Running
 
-**macOS / Linux / WSL** (Mock camera):
+**macOS / Linux / WSL**:
+
+```bash
+./scripts/run.sh
+```
+
+Or manually (Mock camera):
 
 ```bash
 cd backend
@@ -56,6 +69,12 @@ cd backend
 ```
 
 **Windows**:
+
+```powershell
+.\scripts\run.ps1
+```
+
+Or manually:
 
 ```powershell
 cd backend
