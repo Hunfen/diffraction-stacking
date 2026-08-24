@@ -124,7 +124,7 @@ if ($existingConnections.Count -gt 0) {
                 try {
                     Stop-Process -Id $procId -Force -ErrorAction Stop
                 } catch {
-                    Write-Host "[run][WARN] Could not stop PID $procId: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "[run][WARN] Could not stop PID ${procId}: $($_.Exception.Message)" -ForegroundColor Yellow
                 }
             }
 
