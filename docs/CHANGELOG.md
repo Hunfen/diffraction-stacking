@@ -16,7 +16,7 @@ All notable changes to this project are documented in this file.
 - **Live Preview notice**: the dismissible inline alert on the Live page was removed and replaced with an antd popup notification.
 - **Manual exposure/gain overrides auto**: on the mock camera, setting `exposure`/`gain` while the corresponding auto function is enabled disables that auto function, mirroring real camera behavior.
 - Changelog moved to `docs/CHANGELOG.md`.
-- **Run launcher**: `scripts/run.ps1` / `scripts/run.sh` now detect an already-running backend on the chosen port and reuse it instead of exiting with EADDRINUSE/WinError 10048; they also print the actual access URLs including the machine's LAN IPv4 addresses, and warn when the running backend is still serving an older version than the repository.
+- **Run launcher**: `scripts/run.ps1` / `scripts/run.sh` now detect an already-running backend on the chosen port and reuse it instead of exiting with EADDRINUSE/WinError 10048; they also print the actual access URLs including the machine's LAN IPv4 addresses, and warn when the running backend is still serving an older version than the repository. Added `-Stop`/`-Restart` (PowerShell) and `--stop`/`--restart` (bash) to safely stop a confirmed backend and optionally restart it; non-backend port occupants are never killed.
 - **Frontend dist is now committed**: `frontend/dist` is no longer git-ignored, so pulling the repository also updates the served frontend without requiring a manual `npm run build`.
 
 ### Fixed
