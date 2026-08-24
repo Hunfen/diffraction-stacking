@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file.
 - **Histogram**: the live histogram is now computed from the **JPEG-decoded 8-bit preview** — the exact byte stream the browser receives — and is a fixed 0–255, 256-bin histogram. This fixes cases where the pre-JPEG auto-contrast array was quantized to a few levels (e.g. only 0/255) while the displayed JPEG still showed many gray levels.
 - **Manual exposure/gain overrides auto**: on the mock camera, setting `exposure`/`gain` while the corresponding auto function is enabled disables that auto function, mirroring real camera behavior.
 - Changelog moved to `docs/CHANGELOG.md`.
+- **Run launcher**: `scripts/run.ps1` / `scripts/run.sh` now detect an already-running backend on the chosen port and reuse it instead of exiting with EADDRINUSE/WinError 10048; they also print the actual access URLs including the machine's LAN IPv4 addresses.
 
 ### Fixed
 
