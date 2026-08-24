@@ -501,7 +501,15 @@ function NumericPropertyRow({
   );
 }
 
-function BoolPropertyRow({ prop, onPut }: { prop: CameraProperty; onPut: (name: string, value: boolean) => Promise<PropertyPutResult | undefined> }) {
+function BoolPropertyRow({
+  prop,
+  onPut,
+  compact,
+}: {
+  prop: CameraProperty;
+  onPut: (name: string, value: boolean) => Promise<PropertyPutResult | undefined>;
+  compact?: boolean;
+}) {
   // 外部值变化由父组件 key={name:value} 触发重挂载同步，避免 effect 内 setState
   const [value, setValue] = useState<boolean>(() => Boolean(prop.value));
 
@@ -513,6 +521,35 @@ function BoolPropertyRow({ prop, onPut }: { prop: CameraProperty; onPut: (name: 
       setValue(Boolean(prop.value));
     }
   };
+
+  if (compact) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          border: '1px solid rgba(128,128,128,0.35)',
+          borderRadius: 6,
+          padding: '4px 8px',
+          height: '100%',
+        }}
+      >
+        <div>
+          <Typography.Text strong style={{ fontSize: 12 }}>
+            {prop.label}
+          </Typography.Text>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+              {prop.name}
+            </Typography.Text>
+          </div>
+        </div>
+        <Switch size="small" checked={value} onChange={(v) => void apply(v)} />
+      </div>
+    );
+  }
 
   return (
     <Row justify="space-between" align="middle" style={{ marginBottom: 8 }}>
@@ -647,7 +684,7 @@ export default function LivePage() {
   );
   // 契约 v1.3：触发模式开关从 Live 页移除（后端属性保留不动）
   const boolProps = useMemo(
-    () => ['reverse_x', 'reverse_y'].flatMap((name) => {
+    () => ['reverse_x', 'reverse_y', 'auto_exposure', 'auto_gain'].flatMap((name) => {
       const prop = propByName[name];
       return prop ? [prop] : [];
     }),
@@ -875,7 +912,7 @@ export default function LivePage() {
         await putProperty('offset_x', offsetX);
         await putProperty('offset_y', offsetY);
         await refresh();
-        message.success(`ROI set to ${offsetX},${offsetY} ${width}×${height}`);
+        message.success(`Capture region set to ${offsetX},${offsetY} ${width}×${height}`);
       } catch {
         /* 错误已由 api client 统一提示 */
       } finally {
@@ -918,7 +955,7 @@ export default function LivePage() {
       await putProperty('offset_x', snapRoi(0, roi.offsetX));
       await putProperty('offset_y', snapRoi(0, roi.offsetY));
       await refresh();
-      message.success('ROI reset to full frame');
+      message.success('Capture region reset to full frame');
     } catch {
       /* 错误已由 api client 统一提示 */
     } finally {
@@ -1031,7 +1068,7 @@ export default function LivePage() {
                 {streamStarted
                   ? 'Stop acquisition before editing the capture region.'
                   : acquisitionPending
-                    ? 'Starting acquisition — ROI editing is temporarily locked.'
+                    ? 'Starting acquisition — capture region editing is temporarily locked.'
                     : 'Drag on the image to select the capture region; releasing the mouse converts the selection by the preview scale and writes it to the camera.'}
               </Typography.Text>
             )}
@@ -1063,7 +1100,7 @@ export default function LivePage() {
                       <Statistic title="FPS" value={stats.fps} precision={1} />
                     </Col>
                   </Row>
-                  <Divider style={{ margin: '12px 0' }}>Histogram (256 bins)</Divider>
+                  <Divider style={{ margin: '12px 0' }}>Histogram (8-bit preview · 256 bins)</Divider>
                   <div style={{ height: 180 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={histogramData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
@@ -1201,16 +1238,20 @@ export default function LivePage() {
                   />
                 ))}
                 <Divider style={{ margin: '12px 0' }} />
-                {boolProps.map((p) => (
-                  <BoolPropertyRow key={`${p.name}:${String(p.value)}`} prop={p} onPut={putProperty} />
-                ))}
+                <Row gutter={[12, 8]}>
+                  {boolProps.map((p) => (
+                    <Col xs={12} sm={8} md={6} key={`${p.name}:${String(p.value)}`}>
+                      <BoolPropertyRow compact prop={p} onPut={putProperty} />
+                    </Col>
+                  ))}
+                </Row>
               </>
             )}
           </Card>
         </Col>
 
         <Col xs={24} lg={8}>
-          <Card size="small" title="Capture Region (ROI)" loading={propsLoading}>
+          <Card size="small" title="Capture Region (Width × Height)" loading={propsLoading}>
             {roiProps.length === 0 && !propsLoading ? (
               propertiesError ? (
                 <Typography.Text type="danger">
@@ -1218,17 +1259,17 @@ export default function LivePage() {
                 </Typography.Text>
               ) : deviceOpen === false ? (
                 <Typography.Text type="secondary">
-                  Open a device on the “Connect” page first to see ROI properties.
+                  Open a device on the “Connect” page first to see capture region properties.
                 </Typography.Text>
               ) : (
                 <Typography.Text type="secondary">
-                  The current camera does not report ROI properties (the mock driver supports at least width/height).
+                  The current camera does not report capture region properties (the mock driver supports at least width/height).
                 </Typography.Text>
               )
             ) : (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <div>
-                  <Typography.Text>Current ROI: {roiWidthText}</Typography.Text>
+                  <Typography.Text>Current region: {roiWidthText}</Typography.Text>
                   <br />
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     Full-frame maximum: {roiMaxText} · Two-way sync with preview drag
@@ -1243,7 +1284,7 @@ export default function LivePage() {
                   />
                 ) : acquisitionPending ? (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Starting acquisition — ROI editing is temporarily locked.
+                    Starting acquisition — capture region editing is temporarily locked.
                   </Typography.Text>
                 ) : (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>

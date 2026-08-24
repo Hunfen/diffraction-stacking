@@ -194,12 +194,39 @@ def step_open_properties():
     check("exposure" in props and props["exposure"]["min"] == 30
           and props["exposure"]["max"] == 30000000, "exposure range 30-30000000 us")
     check(props["width"]["value"] == 1024 and props["height"]["value"] == 768,
-          "default ROI 1024x768")
+          "default capture region 1024x768")
+    check(props["width"]["min"] == 480 and props["width"]["step"] == 16,
+          "width range min=480 step=16")
+    check(props["height"]["min"] == 4 and props["height"]["step"] == 4,
+          "height range min=4 step=4")
+    check(props["offset_x"]["step"] == 4 and props["offset_y"]["step"] == 4,
+          "offset x/y step=4")
+    check(props["width"]["label"] == "Width" and props["height"]["label"] == "Height"
+          and props["offset_x"]["label"] == "Offset X"
+          and props["offset_y"]["label"] == "Offset Y",
+          "width/height/offset labels use non-ROI names")
+    check("auto_exposure" in props and props["auto_exposure"]["value"] is True,
+          "auto_exposure present and default True")
+    check("auto_gain" in props and props["auto_gain"]["value"] is True,
+          "auto_gain present and default True")
     check("mock_pattern" in props and "leed" in props["mock_pattern"].get("options", []),
           "mock_pattern enum (leed/rheed)")
 
+    _, r = http_req("PUT", "/api/properties/auto_exposure", {"value": False})
+    check(r.get("ok") and r["data"]["actual"] is False, "disable auto_exposure")
+    _, r = http_req("PUT", "/api/properties/auto_exposure", {"value": True})
+    check(r.get("ok") and r["data"]["actual"] is True, "re-enable auto_exposure")
+    _, r = http_req("PUT", "/api/properties/auto_gain", {"value": False})
+    check(r.get("ok") and r["data"]["actual"] is False, "disable auto_gain")
+    _, r = http_req("PUT", "/api/properties/auto_gain", {"value": True})
+    check(r.get("ok") and r["data"]["actual"] is True, "re-enable auto_gain")
+
     _, r = http_req("PUT", "/api/properties/exposure", {"value": 3000})
     check(r.get("ok") and r["data"]["actual"] == 3000, "setting exposure=3000 applied")
+    _, props_after_exposure = http_req("GET", "/api/properties")
+    props_after_exposure = {p["name"]: p for p in props_after_exposure["data"]["properties"]}
+    check(props_after_exposure["auto_exposure"]["value"] is False,
+          "manual exposure disables auto_exposure")
     _, r = http_req("PUT", "/api/properties/gain", {"value": 1.5})
     check(r.get("ok") and abs(r["data"]["actual"] - 1.5) < 1e-6, "setting gain=1.5")
     _, r = http_req("PUT", "/api/properties/black_level", {"value": 5})
@@ -216,6 +243,12 @@ def step_open_properties():
           and "nan" not in err.lower() and "ValueError" not in err
           and "Traceback" not in err,
           "unclassified camera error 500 does not leak exception details")
+    _, r = http_req("PUT", "/api/properties/auto_exposure", {"value": True})
+    check(r.get("ok") and r["data"]["actual"] is True,
+          "restore auto_exposure after manual exposure tests")
+    _, r = http_req("PUT", "/api/properties/auto_gain", {"value": True})
+    check(r.get("ok") and r["data"]["actual"] is True,
+          "restore auto_gain after manual gain test")
     _, r = http_req("PUT", "/api/properties/mock_drift", {"value": True})
     check(r.get("ok") and r["data"]["actual"] is True, "enable mock slow drift")
 
@@ -469,7 +502,9 @@ def step_live_snapshot():
         check(isinstance(stats.get("histogram"), list)
               and len(stats["histogram"]) == 256
               and all(isinstance(v, int) for v in stats["histogram"]),
-              "histogram has 256 ints")
+              "histogram has 256 ints from the JPEG-decoded 8-bit preview")
+        check(sum(1 for v in stats.get("histogram", []) if v) > 3,
+              "JPEG-decoded 8-bit preview histogram is not degenerate (more than 3 bins populated)")
         check(isinstance(jpeg, (bytes, bytearray)) and jpeg[:2] == b"\xff\xd8",
               "binary message right after stats is JPEG (0xFFD8)")
 

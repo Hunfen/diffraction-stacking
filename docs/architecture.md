@@ -11,7 +11,7 @@
 
 1. **前端**：
    - 实时显示 CMOS 相机影像（Live 预览）
-   - 显示/调节相机控制参数（曝光、增益、黑电平、ROI、binning、触发等）
+   - 显示/调节相机控制参数（曝光、增益、黑电平、自动曝光/自动增益、采集区域 Width/Height、binning、触发等）
    - 序列拍摄界面（亮场 / 暗场 / 平场 / 偏置场）
    - 数据处理界面（标定、叠加、拉伸显示、结果导出）
 2. **后端**：
@@ -154,8 +154,10 @@ flowchart LR
 |---|---|---|
 | exposure | 曝光时间 | 30 µs – 30 s |
 | gain | 模拟/数字增益 | 0 – 48 dB |
+| auto_exposure | 自动曝光开关（ExposureAuto: Continuous/Off） | bool（默认开） |
+| auto_gain | 自动增益开关（GainAuto: Continuous/Off） | bool（默认开） |
 | black_level | 黑电平/偏置 | 由相机报告 |
-| width/height/offset_x/offset_y | ROI | ≤ 1920 × 1200 |
+| width/height/offset_x/offset_y | 采集区域（Width/Height/OffsetX/OffsetY） | Width 480–1920/step 16，Height 4–1200/step 4 |
 | binning | 水平/垂直 binning | 由相机报告 |
 | trigger_mode | 软触发/连续 | on/off |
 | reverse_x / reverse_y | 镜像 | bool |
@@ -199,7 +201,7 @@ idle → running → (phase 开始前) waiting_user → capturing → phase_done
 - 自动中止规则：连续 5 帧抓取失败；磁盘剩余空间检查尚未实现
 
 **四个 Phase 的详细定义**（全部 Phase 默认共用同一组
-gain / black_level / ROI / binning / 触发设置，只有曝光和物理环境不同）：
+gain / black_level / 采集区域 / binning / 触发设置，只有曝光和物理环境不同）：
 
 #### Phase 1 — BIAS（偏置场）
 
@@ -364,11 +366,11 @@ data/
 - 连接状态指示灯；断线自动重连提示
 
 **② 实时预览 `/live`**
-- 左：`<canvas>` 渲染 WebSocket JPEG 流；叠加十字准星、ROI 框
+- 左：`<canvas>` 渲染 WebSocket JPEG 流；叠加十字准星、采集区域框
 - 右上：实时直方图 + min/max/mean/饱和比例；FPS 显示
 - 右侧参数面板：
   - 曝光（µs/ms 单位切换）、增益（dB）、黑电平
-  - ROI（x/y/w/h 数字输入 + 拖框）、binning
+  - 采集区域（width/height/offset_x/offset_y 数字输入 + 拖框）、binning
   - 触发模式、镜像、帧率
   - 自动对比度开关（单色灰阶映射，无彩色 LUT；仅影响预览显示）
   - 抓拍按钮（单帧存 FITS/TIFF/PNG）

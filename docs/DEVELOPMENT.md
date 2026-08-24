@@ -20,7 +20,7 @@
 ## 特性
 
 - 实时预览：WebSocket 推送 JPEG 帧 + 逐帧统计（min/max/mean/std/饱和比例/256-bin 直方图）
-- 参数面板：曝光 / 增益 / 黑电平 / ROI / 镜像 / 触发等即调即生效，显示相机实际返回值
+- 参数面板：曝光 / 增益 / 黑电平 / 自动曝光开关 / 自动增益开关 / 采集区域（Width × Height）/ 镜像 / 触发等即调即生效，显示相机实际返回值
 - 四相位序列拍摄：`BIAS → DARK → FLAT → LIGHT`，每相位有引导提示；
   **LIGHT 前强制人工对照实时直方图确认参数**（中心束过曝程度由人工判断）
 - 坏帧排除：处理时按文件名 `exclude`，前后端真实生效
@@ -149,7 +149,7 @@ cd backend
 ### 4. 使用流程
 
 1. **连接**：`/connect` 页选择 `mock-1`（开发）或 `ic4-<serial>`（真机）并打开
-2. **实时预览**：`/live` 页看画面与直方图，调曝光/增益/黑电平/ROI 等参数
+2. **实时预览**：`/live` 页看画面与直方图，调曝光/增益/黑电平/采集区域/自动曝光/自动增益等参数
 3. **序列拍摄**：`/capture` 页创建计划（或点“默认衍射套装”），按提示依次完成
    BIAS（盖镜头盖）→ DARK（保持盖盖）→ FLAT（束流散焦均匀照明）→ LIGHT（人工确认参数后开始）
 4. **数据处理**：`/processing` 页选 session → 排除坏帧 → calibrate → stack → stretch 预览并下载结果
@@ -195,7 +195,7 @@ cd frontend && npm run build && npm run lint
 
 - 合成静态 LEED/RHEED 点阵：规则格点高斯斑 + 亮 00 斑 + 荧光屏背景辉光
 - 噪声模型：读出噪声 + 泊松噪声（混合实现）+ 热像素；exposure / gain / black_level 均生效
-- 默认 ROI 1024×768（最高 1920×1200）；满 ROI 衍射场景约 22–24 fps
+- 默认采集区域 1024×768（Width 480–1920/step 16，Height 4–1200/step 4）；满幅衍射场景约 22–24 fps
 - 温度缓慢漂移、可选亚像素漂移（用于配准功能演示）
 - 特殊属性：`mock_scene`（diffraction / uniform / dark）、`mock_drift`
 

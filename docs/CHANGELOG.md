@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0] - 2026-08-24
+
+### Added
+
+- **Auto Exposure / Auto Gain switches**: `auto_exposure` and `auto_gain` are now first-class bool camera properties. The Live page shows them as compact status switches next to Reverse X / Reverse Y in Camera Parameters, so the current state is visible and both functions can be toggled directly.
+- **Sensor readout area renamed**: the Live page card is now titled “Capture Region (Width × Height)” and the backend property labels are `Width`, `Height`, `Offset X`, `Offset Y` instead of ROI-prefixed labels.
+
+### Changed
+
+- **Mock camera sensor ranges**: `width` min/step is now 480/16 px and `height` min/step is now 4/4 px, matching the DMK 33GX249e technical manual; offsets now use a step of 4 px.
+- **Histogram**: the live histogram is now computed from the **JPEG-decoded 8-bit preview** — the exact byte stream the browser receives — and is a fixed 0–255, 256-bin histogram. This fixes cases where the pre-JPEG auto-contrast array was quantized to a few levels (e.g. only 0/255) while the displayed JPEG still showed many gray levels.
+- **Manual exposure/gain overrides auto**: on the mock camera, setting `exposure`/`gain` while the corresponding auto function is enabled disables that auto function, mirroring real camera behavior.
+- Changelog moved to `docs/CHANGELOG.md`.
+
+### Fixed
+
+- **IC4 auto enum mapping**: `ExposureAuto`/`GainAuto` enum values (`Continuous`/`Off`) are read and written correctly through the bool contract properties.
+
 ## [1.5.0] - 2026-08-24
 
 ### Added

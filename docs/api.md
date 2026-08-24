@@ -67,7 +67,7 @@
 **GET /api/health**
 
 ```json
-{ "ok": true, "data": { "status": "ok", "version": "0.1.0", "platform": "darwin", "camera_driver": "mock" }, "error": null }
+{ "ok": true, "data": { "status": "ok", "version": "1.6.0", "platform": "darwin", "camera_driver": "mock" }, "error": null }
 ```
 
 `camera_driver`：`mock`（无 ic4 时）/ `ic4`（已加载 imagingcontrol4）。
@@ -118,8 +118,18 @@
     "step": 1, "unit": "us", "readonly": false, "type": "int" },
   { "name": "gain", "label": "Gain", "value": 0, "min": 0, "max": 48,
     "step": 0.1, "unit": "dB", "readonly": false, "type": "float" },
+  { "name": "auto_exposure", "label": "Auto Exposure", "value": true, "readonly": false, "type": "bool" },
+  { "name": "auto_gain", "label": "Auto Gain", "value": true, "readonly": false, "type": "bool" },
   { "name": "black_level", "label": "Black Level", "value": 0, "min": 0, "max": 255,
     "step": 1, "unit": "ADU", "readonly": false, "type": "int" },
+  { "name": "width", "label": "Width", "value": 1024, "min": 480, "max": 1920,
+    "step": 16, "unit": "px", "readonly": false, "type": "int" },
+  { "name": "height", "label": "Height", "value": 768, "min": 4, "max": 1200,
+    "step": 4, "unit": "px", "readonly": false, "type": "int" },
+  { "name": "offset_x", "label": "Offset X", "value": 448, "min": 0, "max": 896,
+    "step": 4, "unit": "px", "readonly": false, "type": "int" },
+  { "name": "offset_y", "label": "Offset Y", "value": 216, "min": 0, "max": 432,
+    "step": 4, "unit": "px", "readonly": false, "type": "int" },
   { "name": "reverse_x", "label": "Reverse X", "value": false, "readonly": false, "type": "bool" },
   { "name": "reverse_y", "label": "Reverse Y", "value": false, "readonly": false, "type": "bool" },
   { "name": "trigger_mode", "label": "Trigger Mode", "value": false, "readonly": false, "type": "bool" },
@@ -129,7 +139,7 @@
 ```
 
 - 数值型属性必须有 `min/max/step/unit`；bool 型无 min/max；枚举型（若出现）带 `options`
-- ROI 通过 width/height/offset_x/offset_y 表达（若相机支持），mock 至少支持 width/height
+- Capture region（采集区域）通过 width/height/offset_x/offset_y 表达（若相机支持）；width/height 对应 GenICam `Width`/`Height`，mock 至少支持 width/height
 
 **PUT /api/properties/{name}** — body `{ "value": 50000 }`
 
@@ -160,8 +170,8 @@
   "fps": 15.0, "histogram": [ <256 个 int> ] }
 ```
 
-- `histogram` 为 **8-bit 预览图**的 256 bin 直方图（前后端显示口径一致）
-- JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=ROI×scale
+- `histogram` 为浏览器实际接收的 **JPEG 解码后 8-bit 预览图**的固定 0–255、256 bin 直方图（后端先编码 JPEG，再解码同一字节流统计，前后端显示口径一致）
+- JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=当前采集区域×scale
 
 **GET /api/browse/folders**（v1.4）— 目录浏览器数据源（抓拍文件夹选择）
 
@@ -514,7 +524,7 @@ qc_report.json = { frames, total_exposure_us, effective_bits≈log2√N,
 - 合成**静态 LEED/RHEED 衍射图案**：规则格点高斯斑（多级衍射点）+ 亮 00 斑 + 荧光屏背景辉光；uint16 数值 ≤ 4095
 - 噪声模型：读出噪声（高斯，~1.5 ADU）+ 泊松噪声（√signal）+ 固定热像素（约 0.05% 像素）
 - `exposure` 线性放大信号并放大泊松噪声；`gain` 倍乘信号与噪声；`black_level` 为加性偏置；三者均按 12-bit 截断
-- 默认 ROI 1024×768（可设 width/height 至 1920×1200），帧生成时间应满足 ≥10 fps
+- 默认采集区域 1024×768（width 480–1920/step 16；height 4–1200/step 4），帧生成时间应满足 ≥10 fps
 - 温度随运行时间缓慢上升（室温 +0.05 °C/分钟，供 dark 匹配演示）
 - 支持可选的慢速图案漂移（每帧亚像素级），供 registration 功能演示
 - mock 帧率目标 30 fps 以上（1024×768 时），`trigger_mode=true` 时不自动出帧

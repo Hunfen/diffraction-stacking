@@ -111,7 +111,7 @@ class MockCamera(BaseCamera):
       + 读出噪声（高斯 ~1.5 ADU）+ 泊松噪声 + 固定热像素（~0.05%）
     - exposure 线性放大信号并放大泊松噪声；gain(dB) 倍乘信号与噪声；
       black_level 为加性偏置；均按 12-bit 截断
-    - 默认 ROI 1024×768，上限 1920×1200；温度随运行时间缓慢上升
+    - 默认 capture region（Width × Height）1024×768，上限 1920×1200；温度随运行时间缓慢上升
     - 可选亚像素级慢漂移（供 registration 演示）
     """
 
@@ -134,16 +134,18 @@ class MockCamera(BaseCamera):
                               min_=30, max_=30_000_000, step=1, unit="us"),
             "gain": _prop("gain", "Gain", 0.0, "float",
                           min_=0.0, max_=48.0, step=0.1, unit="dB"),
+            "auto_exposure": _prop("auto_exposure", "Auto Exposure", True, "bool"),
+            "auto_gain": _prop("auto_gain", "Auto Gain", True, "bool"),
             "black_level": _prop("black_level", "Black Level", 0, "int",
                                  min_=0, max_=255, step=1, unit="ADU"),
-            "width": _prop("width", "ROI Width", 1024, "int",
-                           min_=320, max_=FULL_WIDTH, step=8, unit="px"),
-            "height": _prop("height", "ROI Height", 768, "int",
-                            min_=240, max_=FULL_HEIGHT, step=8, unit="px"),
-            "offset_x": _prop("offset_x", "ROI X Offset", (FULL_WIDTH - 1024) // 2,
-                              "int", min_=0, max_=FULL_WIDTH - 1024, step=8, unit="px"),
-            "offset_y": _prop("offset_y", "ROI Y Offset", (FULL_HEIGHT - 768) // 2,
-                              "int", min_=0, max_=FULL_HEIGHT - 768, step=8, unit="px"),
+            "width": _prop("width", "Width", 1024, "int",
+                           min_=480, max_=FULL_WIDTH, step=16, unit="px"),
+            "height": _prop("height", "Height", 768, "int",
+                            min_=4, max_=FULL_HEIGHT, step=4, unit="px"),
+            "offset_x": _prop("offset_x", "Offset X", (FULL_WIDTH - 1024) // 2,
+                              "int", min_=0, max_=FULL_WIDTH - 1024, step=4, unit="px"),
+            "offset_y": _prop("offset_y", "Offset Y", (FULL_HEIGHT - 768) // 2,
+                              "int", min_=0, max_=FULL_HEIGHT - 768, step=4, unit="px"),
             "reverse_x": _prop("reverse_x", "Reverse X", False, "bool"),
             "reverse_y": _prop("reverse_y", "Reverse Y", False, "bool"),
             "trigger_mode": _prop("trigger_mode", "Trigger Mode", False, "bool"),
@@ -198,6 +200,12 @@ class MockCamera(BaseCamera):
             p = self._props[name]
             if p["readonly"]:
                 raise CameraError(f"Property {name} is read-only")
+            # Manual exposure/gain control disables the corresponding auto
+            # control first (mirrors the DMK 33GX249e behavior).
+            if name == "exposure" and self._props["auto_exposure"]["value"]:
+                self._props["auto_exposure"]["value"] = False
+            if name == "gain" and self._props["auto_gain"]["value"]:
+                self._props["auto_gain"]["value"] = False
             ptype = p["type"]
             if ptype in ("int", "float"):
                 try:
@@ -600,11 +608,13 @@ class IC4Camera(BaseCamera):
     _SPEC = (
         ("exposure", "EXPOSURE_TIME", "float", "Exposure", "us"),
         ("gain", "GAIN", "float", "Gain", "dB"),
+        ("auto_exposure", "EXPOSURE_AUTO", "bool", "Auto Exposure", ""),
+        ("auto_gain", "GAIN_AUTO", "bool", "Auto Gain", ""),
         ("black_level", "BLACK_LEVEL", "int", "Black Level", "ADU"),
-        ("width", "WIDTH", "int", "ROI Width", "px"),
-        ("height", "HEIGHT", "int", "ROI Height", "px"),
-        ("offset_x", "OFFSET_X", "int", "ROI X Offset", "px"),
-        ("offset_y", "OFFSET_Y", "int", "ROI Y Offset", "px"),
+        ("width", "WIDTH", "int", "Width", "px"),
+        ("height", "HEIGHT", "int", "Height", "px"),
+        ("offset_x", "OFFSET_X", "int", "Offset X", "px"),
+        ("offset_y", "OFFSET_Y", "int", "Offset Y", "px"),
         ("reverse_x", "REVERSE_X", "bool", "Reverse X", ""),
         ("reverse_y", "REVERSE_Y", "bool", "Reverse Y", ""),
         ("trigger_mode", "TRIGGER_MODE", "bool", "Trigger Mode", ""),
@@ -768,7 +778,7 @@ class IC4Camera(BaseCamera):
                              exc_info=True)
 
     def stop_acquisition(self) -> None:
-        """停止采集流但保持设备打开，解除 ROI 等属性的 locked 状态。"""
+        """停止采集流但保持设备打开，解除 Width/Height 等采集区域属性的 locked 状态。"""
         with self._lock:
             grabber = self._grabber
             if grabber is None or not self._opened:
@@ -925,6 +935,16 @@ class IC4Camera(BaseCamera):
             raise CameraError(f"Property {name} is currently unavailable", status=409)
         readonly = bool(prop.is_readonly)
         if ptype == "bool":
+            if name in ("auto_exposure", "auto_gain"):
+                # ExposureAuto/GainAuto are GenICam enums (Continuous/Off).
+                # Read them as strings so Continuous maps to True and Off to False;
+                # fall back to the bool reader for cameras that expose a real bool.
+                try:
+                    s = str(pmap.get_value_str(pid)).strip().lower()
+                    value = s in ("continuous", "on", "true", "1")
+                except Exception:  # noqa: BLE001
+                    value = pmap.get_value_bool(pid)
+                return _prop(name, label, bool(value), "bool", readonly=readonly)
             try:
                 value = pmap.get_value_bool(pid)
             except Exception:  # noqa: BLE001
@@ -1028,23 +1048,28 @@ class IC4Camera(BaseCamera):
                         status=409)
                 actual_arg = self._coerce_value(prop, name, value, ptype)
                 if ptype == "bool":
-                    try:
-                        pmap.set_value(pid, actual_arg)
-                    except Exception:
-                        # 部分相机的 bool 契约属性底层是枚举（如 TriggerMode=On/Off），
-                        # 直接用 Python bool 会类型不匹配；回退到常见枚举字符串。
-                        candidates = (["On", "True", "1"] if actual_arg
-                                      else ["Off", "False", "0"])
-                        for cand in candidates:
-                            try:
-                                pmap.set_value(pid, cand)
-                                break
-                            except Exception:
-                                continue
-                        else:
-                            raise CameraError(
-                                f"Failed to set property {name}: no matching enum value "
-                                f"for boolean {actual_arg}", status=400)
+                    if name in ("auto_exposure", "auto_gain"):
+                        # ExposureAuto/GainAuto are GenICam enums: use the exact
+                        # Continuous/Off strings instead of a Python bool.
+                        pmap.set_value(pid, "Continuous" if actual_arg else "Off")
+                    else:
+                        try:
+                            pmap.set_value(pid, actual_arg)
+                        except Exception:
+                            # 部分相机的 bool 契约属性底层是枚举（如 TriggerMode=On/Off），
+                            # 直接用 Python bool 会类型不匹配；回退到常见枚举字符串。
+                            candidates = (["On", "True", "1"] if actual_arg
+                                          else ["Off", "False", "0"])
+                            for cand in candidates:
+                                try:
+                                    pmap.set_value(pid, cand)
+                                    break
+                                except Exception:
+                                    continue
+                            else:
+                                raise CameraError(
+                                    f"Failed to set property {name}: no matching enum value "
+                                    f"for boolean {actual_arg}", status=400)
                 else:
                     pmap.set_value(pid, actual_arg)
             except CameraError:

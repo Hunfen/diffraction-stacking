@@ -203,7 +203,7 @@ def frame_stats(frame: np.ndarray) -> dict:
 
 
 def histogram_256(img8: np.ndarray) -> list[int]:
-    """8-bit 预览图 256 bin 直方图。"""
+    """Fixed 256-bin histogram of the 8-bit preview image (values 0..255)."""
     counts = np.bincount(np.asarray(img8, dtype=np.uint8).ravel(), minlength=256)
     return [int(v) for v in counts]
 

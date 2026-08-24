@@ -10,7 +10,7 @@ The target is static, so no equatorial mount, guiding, or de-rotation is needed.
 ## Features
 
 - **Live preview & histogram**: view the live image and per-frame stats (min / max / mean / std / saturation ratio / 256-bin histogram)
-- **Parameter control**: exposure, gain, black level, ROI, mirror, and trigger apply instantly, with the camera's actual values reported back
+- **Parameter control**: exposure, gain, black level, auto exposure/auto gain switches, capture region (Width × Height), mirror, and trigger apply instantly, with the camera's actual values reported back
 - **Four-phase capture**: Bias → Dark → Flat → Light with guided prompts; **before Light starts you manually confirm parameters against the histogram**
 - **Bad-frame exclusion**: exclude frames by filename during processing; calibration / stacking both honor it
 - **Calibrate / Stack / Rescale preview**: Calibrate → Stack → Rescale, with live progress and downloadable results
@@ -86,7 +86,7 @@ Open **http://localhost:8000** in your browser; other machines on the LAN can us
 ## Workflow
 
 1. **Connect**: choose `mock-1` (no camera) or `ic4-<serial>` (real camera) and open the device
-2. **Live**: inspect the live preview and histogram, and adjust exposure / gain / black level / ROI etc.
+2. **Live**: inspect the live preview and histogram, and adjust exposure / gain / black level / capture region / auto exposure / auto gain etc.
 3. **Capture**: create a capture plan (or use the default template) and follow the prompts:
    Bias (lens cap on) → Dark (cap still on) → Flat (defocused beam / uniform illumination) → Light (confirm parameters manually, then start)
 4. **Processing**: select a session → uncheck bad frames → Calibrate → Stack → Rescale preview and download results

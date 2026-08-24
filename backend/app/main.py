@@ -343,10 +343,14 @@ class LiveService:
             stats = frame_stats(frame)
             preview = auto_contrast_8bit(frame)
             stats["fps"] = self._ema_fps(count, started)
-            stats["histogram"] = histogram_256(preview)
             buf = BytesIO()
             Image.fromarray(preview, mode="L").save(
                 buf, format="JPEG", quality=self.params["quality"])
+            # Histogram is computed from the JPEG-decoded 8-bit preview (the exact
+            # bytes the browser receives), not from the pre-JPEG preview array or
+            # the raw 12-bit frame.
+            stats["histogram"] = histogram_256(
+                Image.open(BytesIO(buf.getvalue())).convert("L"))
             self.manager.broadcast_frame(stats, buf.getvalue())
             count += 1
 

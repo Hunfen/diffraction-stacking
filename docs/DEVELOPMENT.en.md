@@ -27,7 +27,7 @@ guiding, or de-rotation** is needed.
 ## Features
 
 - Live preview: WebSocket JPEG stream + per-frame stats (min/max/mean/std/saturated-pct/256-bin histogram)
-- Parameter panel: exposure / gain / black level / ROI / mirror / trigger applied instantly,
+- Parameter panel: exposure / gain / black level / auto exposure switch / auto gain switch / capture region (Width × Height) / mirror / trigger applied instantly,
   with the camera's actual value reported back
 - Four-phase sequence capture: `BIAS → DARK → FLAT → LIGHT` with guided prompts for each phase;
   **before LIGHT the operator must manually confirm parameters against the live histogram**
@@ -159,7 +159,7 @@ FastAPI serves `frontend/dist/` directly).
 ### 4. Workflow
 
 1. **Connect**: on `/connect`, choose `mock-1` (development) or `ic4-<serial>` (real camera) and open it
-2. **Live view**: on `/live`, inspect the image and histogram, adjust exposure / gain / black level / ROI etc.
+2. **Live view**: on `/live`, inspect the image and histogram, adjust exposure / gain / black level / capture region / auto exposure / auto gain etc.
 3. **Capture**: on `/capture`, create a plan (or click the default template) and follow the prompts:
    BIAS (lens cap on) → DARK (cap still on) → FLAT (defocused beam / uniform illumination) →
    LIGHT (confirm parameters manually, then start)
@@ -207,7 +207,7 @@ Without hardware the backend always provides `mock-1`:
 - Synthetic static LEED/RHEED pattern: regular grid of Gaussian spots + bright 00 spot + phosphor-screen glow
 - Noise model: read noise + Poisson noise (hybrid implementation) + hot pixels;
   exposure / gain / black_level all take effect
-- Default ROI 1024×768 (up to 1920×1200); ~22–24 fps at full ROI in the diffraction scene
+- Default capture region 1024×768 (Width 480–1920/step 16, Height 4–1200/step 4); ~22–24 fps at full region in the diffraction scene
 - Slowly drifting temperature and optional sub-pixel pattern drift (to exercise registration)
 - Special properties: `mock_scene` (diffraction / uniform / dark), `mock_drift`
 
