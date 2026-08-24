@@ -12,7 +12,8 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - **Mock camera sensor ranges**: `width` min/step is now 480/16 px and `height` min/step is now 4/4 px, matching the DMK 33GX249e technical manual; offsets now use a step of 4 px.
-- **Histogram**: the live histogram is now computed from the **raw 12-bit frame** returned by `grab_frame()`, using 256 bins adapted to the current frame's actual ADU min/max. It no longer uses the auto-contrast/JPEG preview, so short-exposure images do not collapse into a few misleading bars while still following the visible contrast range.
+- **Histogram**: the live histogram is now computed from the **raw 12-bit frame** returned by `grab_frame()`, using 256 bins adapted to the current frame's actual ADU min/max. It no longer uses the auto-contrast/JPEG preview, so short-exposure images do not collapse into a few misleading bars while still following the visible contrast range. Live stats now also include `histogram_min`/`histogram_max` so the frontend can label the autoscaled ADU range.
+- **Live Preview notice**: the dismissible inline alert on the Live page was removed and replaced with an antd popup notification.
 - **Manual exposure/gain overrides auto**: on the mock camera, setting `exposure`/`gain` while the corresponding auto function is enabled disables that auto function, mirroring real camera behavior.
 - Changelog moved to `docs/CHANGELOG.md`.
 - **Run launcher**: `scripts/run.ps1` / `scripts/run.sh` now detect an already-running backend on the chosen port and reuse it instead of exiting with EADDRINUSE/WinError 10048; they also print the actual access URLs including the machine's LAN IPv4 addresses, and warn when the running backend is still serving an older version than the repository.

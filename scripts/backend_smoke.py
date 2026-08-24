@@ -497,8 +497,12 @@ def step_live_snapshot():
         stats = json.loads(stats_text)
         keys_ok = all(k in stats for k in
                       ("min", "max", "mean", "std", "saturated_pct", "fps",
-                       "histogram"))
-        check(keys_ok, "live stats include min/max/mean/std/sat/fps/histogram")
+                       "histogram", "histogram_min", "histogram_max"))
+        check(keys_ok, "live stats include min/max/mean/std/sat/fps/histogram/range")
+        check(isinstance(stats.get("histogram_min"), int)
+              and isinstance(stats.get("histogram_max"), int)
+              and stats["histogram_min"] <= stats["histogram_max"],
+              "histogram_min/max are integers with min <= max")
         check(isinstance(stats.get("histogram"), list)
               and len(stats["histogram"]) == 256
               and all(isinstance(v, int) for v in stats["histogram"]),

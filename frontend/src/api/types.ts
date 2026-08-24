@@ -113,6 +113,8 @@ export interface LiveStats {
   saturated_pct: number;
   fps: number;
   histogram: number[];
+  histogram_min: number;
+  histogram_max: number;
 }
 
 export interface CapturePhasePlan {

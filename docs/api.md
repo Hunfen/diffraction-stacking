@@ -167,10 +167,12 @@
 
 ```json
 { "min": 0, "max": 4095, "mean": 180.2, "std": 42.1, "saturated_pct": 0.31,
-  "fps": 15.0, "histogram": [ <256 个 int> ] }
+  "fps": 15.0, "histogram": [ <256 个 int> ],
+  "histogram_min": 143, "histogram_max": 207 }
 ```
 
 - `histogram` 为 **raw 12-bit 原始帧**（`grab_frame()` 输出）的 256 bin 直方图，bin 范围按当前帧的实际 ADU min–max 自适应缩放；不使用拉伸后的 preview
+- `histogram_min` / `histogram_max`：本次自适应直方图对应的 ADU 上下限（即当前帧 raw min/max），前端用于标注横轴范围
 - JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=当前采集区域×scale
 
 **GET /api/browse/folders**（v1.4）— 目录浏览器数据源（抓拍文件夹选择）

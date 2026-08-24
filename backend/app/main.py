@@ -348,6 +348,8 @@ class LiveService:
             # matches the contrast range the user sees. It does NOT use the
             # auto-contrast/JPEG preview.
             stats["histogram"] = histogram_256(frame)
+            stats["histogram_min"] = int(frame.min())
+            stats["histogram_max"] = int(frame.max())
             buf = BytesIO()
             Image.fromarray(preview, mode="L").save(
                 buf, format="JPEG", quality=self.params["quality"])

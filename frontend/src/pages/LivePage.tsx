@@ -25,6 +25,7 @@ import {
   Tag,
   Typography,
   message,
+  notification,
 } from 'antd';
 import {
   CameraOutlined,
@@ -50,8 +51,6 @@ import type {
 const WS_LIVE = '/ws/live';
 const SNAPSHOT_FOLDER_KEY = 'ds.snapshot.folder';
 const SNAPSHOT_PREFIX_KEY = 'ds.snapshot.prefix';
-/** 统计饱和比例告警阈值（%）。超过后视为警告，用于顶部提示自动复显。 */
-const SATURATION_WARN_THRESHOLD_PCT = 1.0;
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
 
 /** data_root → 默认快照目录 <data_root>/snapshots。 */
@@ -621,6 +620,18 @@ export default function LivePage() {
   } = useAcquisition();
   // Live 页每次挂载读取最新的预览参数（Settings 页修改后进入 /live 即生效）。
   const preview = useMemo(() => getPreviewSettings(), []);
+  const livePreviewInfoShownRef = useRef(false);
+  useEffect(() => {
+    if (livePreviewInfoShownRef.current) return;
+    livePreviewInfoShownRef.current = true;
+    notification.info({
+      key: 'live-preview-info',
+      message: 'Live Preview',
+      description: 'The preview is an 8-bit grayscale auto-contrast image (1%–99% percentile linear stretch) and does not modify camera acquisition parameters.',
+      placement: 'topRight',
+      duration: 6,
+    });
+  }, []);
   // ROI 在采集启动中或采集运行中都被锁住，避免在 start 转换期间写入被采集端拒绝。
   const acquisitionLocked = streamStarted || acquisitionPending;
   const {
@@ -654,9 +665,6 @@ export default function LivePage() {
   const [snapshotPrefix, setSnapshotPrefix] = useState<string>(
     () => localStorage.getItem(SNAPSHOT_PREFIX_KEY) ?? '',
   );
-  // 顶部提示：内存态 dismissed；出现任何警告时自动复显
-  const [alertDismissed, setAlertDismissed] = useState(false);
-
   // ROI 拖选状态
   const [dragging, setDragging] = useState(false);
   const [roiBusy, setRoiBusy] = useState(false);
@@ -963,24 +971,6 @@ export default function LivePage() {
     }
   }, [putProperty, refresh, setRoiBusyState, acquisitionLocked]);
 
-  // ------------------------------------------------------------------ 顶部提示复显
-  const deviceWarning = !propsLoading && deviceOpen === false;
-  const saturationWarning =
-    stats !== null && stats.saturated_pct > SATURATION_WARN_THRESHOLD_PCT;
-
-  // 任一警告来源从「无」变「有」时，顶部提示的 dismissed 状态复位（含其他警告已存在时新增警告，
-  // 以及 WS 在 closed/reconnecting 两个警告态之间切换的情况）
-  const prevWarningsRef = useRef({ deviceWarning, wsStatus, saturationWarning });
-  useEffect(() => {
-    const prev = prevWarningsRef.current;
-    const warningAppeared =
-      (deviceWarning && !prev.deviceWarning)
-      || ((wsStatus === 'closed' || wsStatus === 'reconnecting') && prev.wsStatus !== wsStatus)
-      || (saturationWarning && !prev.saturationWarning);
-    if (warningAppeared) setAlertDismissed(false);
-    prevWarningsRef.current = { deviceWarning, wsStatus, saturationWarning };
-  }, [deviceWarning, wsStatus, saturationWarning]);
-
   const histogramData = useMemo(() => {
     if (!stats) return [];
     return stats.histogram.map((count, bin) => ({ bin, count }));
@@ -995,17 +985,6 @@ export default function LivePage() {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      {!alertDismissed && (
-        <Alert
-          type="info"
-          showIcon
-          closable
-          message="Live Preview"
-          description="The preview is an 8-bit grayscale auto-contrast image (1%–99% percentile linear stretch) and does not modify camera acquisition parameters."
-          onClose={() => setAlertDismissed(true)}
-        />
-      )}
-
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
           <Card
@@ -1115,6 +1094,11 @@ export default function LivePage() {
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  {typeof stats.histogram_min === 'number' && typeof stats.histogram_max === 'number' && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                      ADU range: {stats.histogram_min}–{stats.histogram_max} (autoscaled)
+                    </Typography.Text>
+                  )}
                 </>
               ) : (
                 <Empty
