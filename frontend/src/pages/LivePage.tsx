@@ -215,10 +215,28 @@ function wsStatusTag(status: WsStatus) {
   return <Tag color={meta.color}>{meta.text}</Tag>;
 }
 
+function httpStatus(err: unknown): number | undefined {
+  const response = (err as { response?: { status?: number } }).response;
+  return response?.status;
+}
+
+function httpErrorMessage(err: unknown): string {
+  const data = (err as { response?: { data?: { error?: string } } }).response?.data;
+  if (data && typeof data === 'object' && 'error' in data && data.error) {
+    return String(data.error);
+  }
+  if (err instanceof Error) return err.message;
+  return 'Unknown error';
+}
+
 function useProperties(onActualChange?: () => void) {
   const [properties, setProperties] = useState<CameraProperty[]>([]);
   const [actuals, setActuals] = useState<Record<string, number | boolean>>({});
   const [loading, setLoading] = useState(true);
+  // deviceOpen：仅在收到 409（明确未打开设备）时为 false；成功拉取时为 true。
+  // 其他错误（500/网络）保持未知，不把“设备已打开但属性读取失败”误报成“未打开”。
+  const [deviceOpen, setDeviceOpen] = useState<boolean | null>(null);
+  const [propertiesError, setPropertiesError] = useState<string | null>(null);
   // 请求序号：防止低频轮询与手动 refresh / 初始加载的旧响应覆盖新状态
   const fetchSeqRef = useRef(0);
 
@@ -228,22 +246,46 @@ function useProperties(onActualChange?: () => void) {
     try {
       // 手动刷新/自动探测：未打开设备返回 409 属预期，silent 不弹 toast，页面用内联 Alert 提示
       const data = await apiGet<PropertiesData>('/api/properties', { silent: true });
-      if (seq === fetchSeqRef.current) setProperties(data.properties);
-    } catch {
-      if (seq === fetchSeqRef.current) setProperties([]);
+      if (seq === fetchSeqRef.current) {
+        setProperties(data.properties);
+        setDeviceOpen(true);
+        setPropertiesError(null);
+      }
+    } catch (err) {
+      if (seq === fetchSeqRef.current) {
+        setProperties([]);
+        if (httpStatus(err) === 409) {
+          setDeviceOpen(false);
+          setPropertiesError(null);
+        } else {
+          setPropertiesError(httpErrorMessage(err));
+        }
+      }
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 每 5s 的低频静默轮询：不碰 loading（避免参数卡频繁闪烁）；409/失败 → properties 置空 → deviceWarning
+  // 每 5s 的低频静默轮询：不碰 loading（避免参数卡频繁闪烁）；409 → deviceOpen=false
   const pollProperties = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     try {
       const data = await apiGet<PropertiesData>('/api/properties', { silent: true });
-      if (seq === fetchSeqRef.current) setProperties(data.properties);
-    } catch {
-      if (seq === fetchSeqRef.current) setProperties([]);
+      if (seq === fetchSeqRef.current) {
+        setProperties(data.properties);
+        setDeviceOpen(true);
+        setPropertiesError(null);
+      }
+    } catch (err) {
+      if (seq === fetchSeqRef.current) {
+        setProperties([]);
+        if (httpStatus(err) === 409) {
+          setDeviceOpen(false);
+          setPropertiesError(null);
+        } else {
+          setPropertiesError(httpErrorMessage(err));
+        }
+      }
     }
   }, []);
 
@@ -253,10 +295,22 @@ function useProperties(onActualChange?: () => void) {
     const seq = ++fetchSeqRef.current;
     apiGet<PropertiesData>('/api/properties', { silent: true })
       .then((data) => {
-        if (!cancelled && seq === fetchSeqRef.current) setProperties(data.properties);
+        if (!cancelled && seq === fetchSeqRef.current) {
+          setProperties(data.properties);
+          setDeviceOpen(true);
+          setPropertiesError(null);
+        }
       })
-      .catch(() => {
-        if (!cancelled && seq === fetchSeqRef.current) setProperties([]);
+      .catch((err: unknown) => {
+        if (!cancelled && seq === fetchSeqRef.current) {
+          setProperties([]);
+          if (httpStatus(err) === 409) {
+            setDeviceOpen(false);
+            setPropertiesError(null);
+          } else {
+            setPropertiesError(httpErrorMessage(err));
+          }
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -279,7 +333,16 @@ function useProperties(onActualChange?: () => void) {
     [onActualChange],
   );
 
-  return { properties, actuals, loading, refresh, pollProperties, putProperty };
+  return {
+    properties,
+    actuals,
+    loading,
+    deviceOpen,
+    propertiesError,
+    refresh,
+    pollProperties,
+    putProperty,
+  };
 }
 
 function NumericPropertyRow({
@@ -430,7 +493,16 @@ export default function LivePage() {
   const [stats, setStats] = useState<LiveStats | null>(null);
   const [streamStarted, setStreamStarted] = useState(false);
   const preview = useMemo(() => getPreviewSettings(), []);
-  const { properties, actuals, loading: propsLoading, refresh, pollProperties, putProperty } = useProperties();
+  const {
+    properties,
+    actuals,
+    loading: propsLoading,
+    deviceOpen,
+    propertiesError,
+    refresh,
+    pollProperties,
+    putProperty,
+  } = useProperties();
 
   // 低频静默轮询 /api/properties：页面运行中设备被外部关闭时（409），驱动 deviceWarning 从 false→true
   useEffect(() => {
@@ -768,7 +840,7 @@ export default function LivePage() {
   }, [putProperty, refresh, setRoiBusyState]);
 
   // ------------------------------------------------------------------ 顶部提示复显
-  const deviceWarning = !propsLoading && properties.length === 0;
+  const deviceWarning = !propsLoading && deviceOpen === false;
   const saturationWarning =
     stats !== null && stats.saturated_pct > SATURATION_WARN_THRESHOLD_PCT;
 
@@ -986,7 +1058,13 @@ export default function LivePage() {
             loading={propsLoading}
           >
             {properties.length === 0 && !propsLoading ? (
-              <Alert type="warning" showIcon message="No device open, cannot fetch properties" description='Please open a device on the "Connect" page first (GET /api/properties returns 409 when no device is open).' />
+              propertiesError ? (
+                <Alert type="error" showIcon message="Failed to fetch camera properties" description={propertiesError} />
+              ) : deviceOpen === false ? (
+                <Alert type="warning" showIcon message="No device open, cannot fetch properties" description='Please open a device on the "Connect" page first (GET /api/properties returns 409 when no device is open).' />
+              ) : (
+                <Alert type="info" showIcon message="Camera is open but reports no parameters" description="The camera did not expose any of the supported parameters. Check the backend log for skipped property warnings." />
+              )
             ) : (
               <>
                 {numericProps.map((p) => (
@@ -1009,9 +1087,19 @@ export default function LivePage() {
         <Col xs={24} lg={8}>
           <Card size="small" title="Capture Region (ROI)" loading={propsLoading}>
             {roiProps.length === 0 && !propsLoading ? (
-              <Typography.Text type="secondary">
-                The current camera does not report ROI properties (the mock driver supports at least width/height).
-              </Typography.Text>
+              propertiesError ? (
+                <Typography.Text type="danger">
+                  Unable to fetch camera properties: {propertiesError}
+                </Typography.Text>
+              ) : deviceOpen === false ? (
+                <Typography.Text type="secondary">
+                  Open a device on the “Connect” page first to see ROI properties.
+                </Typography.Text>
+              ) : (
+                <Typography.Text type="secondary">
+                  The current camera does not report ROI properties (the mock driver supports at least width/height).
+                </Typography.Text>
+              )
             ) : (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <div>

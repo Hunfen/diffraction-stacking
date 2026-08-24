@@ -877,8 +877,16 @@ class IC4Camera(BaseCamera):
         elif prop.type == lib.PropertyType.FLOAT:
             # Float increment_mode==NONE：任意值合法，给出一个无害的 UI 步进
             step = max((hi - lo) / 1000.0, 1e-9)
-        return val, lo, hi, max(step, 1e-9 if prop.type == lib.PropertyType.FLOAT
-                               else 1.0)
+        step = max(step, 1e-9 if prop.type == lib.PropertyType.FLOAT else 1.0)
+        # 部分真机属性会把未实现的 range 暴露为 inf/nan（例如某些只读温度属性），
+        # 直接进入 JSON 会变成 500：Out of range float values are not JSON compliant。
+        # 这类属性无法给出可用的 UI 范围，按“当前不可用”跳过，避免拖垮整个列表。
+        for label, value in (("value", val), ("minimum", lo),
+                             ("maximum", hi), ("step", step)):
+            if not math.isfinite(value):
+                raise CameraError(
+                    f"Property returned non-finite {label}: {value}", status=409)
+        return val, lo, hi, step
 
     @staticmethod
     def _prop_unit(prop) -> str:
@@ -918,8 +926,11 @@ class IC4Camera(BaseCamera):
             for name in (s[0] for s in self._SPEC):
                 try:
                     props.append(self._read_prop(pmap, name))
-                except Exception:  # noqa: BLE001
-                    continue  # 相机不支持/暂时不可用的属性按契约跳过
+                except Exception as exc:  # noqa: BLE001
+                    # 相机不支持/暂时不可用/返回非有限值（inf/nan）的属性按契约跳过；
+                    # 记录 warning 方便真机联调时定位是哪条属性被跳过。
+                    _log.warning("ic4 property %s skipped: %s", name, exc)
+                    continue
             return props
 
     def get_property(self, name: str) -> Any:
