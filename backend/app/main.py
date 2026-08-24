@@ -344,8 +344,9 @@ class LiveService:
             preview = auto_contrast_8bit(frame)
             stats["fps"] = self._ema_fps(count, started)
             # Histogram is computed from the raw 12-bit frame (grab_frame output),
-            # 256 bins covering 0..4095 (bin i = ADU [i*16, (i+1)*16-1]). It does
-            # NOT use the auto-contrast/JPEG preview.
+            # with 256 bins adapted to the frame's actual ADU min/max so it
+            # matches the contrast range the user sees. It does NOT use the
+            # auto-contrast/JPEG preview.
             stats["histogram"] = histogram_256(frame)
             buf = BytesIO()
             Image.fromarray(preview, mode="L").save(

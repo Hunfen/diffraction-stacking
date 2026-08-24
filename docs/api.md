@@ -170,7 +170,7 @@
   "fps": 15.0, "histogram": [ <256 个 int> ] }
 ```
 
-- `histogram` 为 **raw 12-bit 原始帧**（`grab_frame()` 输出）的固定 256 bin 直方图：bin 0–255 对应 ADU 0–4095（每 bin 覆盖 16 个 ADU），不使用拉伸后的 preview
+- `histogram` 为 **raw 12-bit 原始帧**（`grab_frame()` 输出）的 256 bin 直方图，bin 范围按当前帧的实际 ADU min–max 自适应缩放；不使用拉伸后的 preview
 - JPEG：8-bit 灰阶、自动对比度（1%~99% 分位线性映射）、质量=quality、尺寸=当前采集区域×scale
 
 **GET /api/browse/folders**（v1.4）— 目录浏览器数据源（抓拍文件夹选择）

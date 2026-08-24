@@ -203,14 +203,20 @@ def frame_stats(frame: np.ndarray) -> dict:
 
 
 def histogram_256(raw12: np.ndarray) -> list[int]:
-    """Fixed 256-bin histogram of the raw 12-bit frame (values 0..4095).
+    """256-bin histogram of the raw 12-bit frame, adapted to the frame's actual
+    ADU min/max so the displayed shape matches the auto-contrast image.
 
-    Bin i covers raw ADU range [i*16, (i+1)*16 - 1]; i.e. the full 0..4095
-    sensor range is divided evenly into 256 bins. Values outside 0..4095 are
-    ignored.
+    The fixed full 0..4095 range collapses short-exposure images into one or
+    two low-ADU bins; using the current frame's min/max keeps the same 256
+    bins while highlighting the signal range that is actually present. Values
+    are still raw ADU counts (not the stretched preview).
     """
     arr = np.asarray(raw12)
-    counts = np.histogram(arr, bins=256, range=(0, 4096))[0]
+    lo = float(np.min(arr))
+    hi = float(np.max(arr))
+    if hi <= lo:
+        hi = lo + 1.0
+    counts = np.histogram(arr, bins=256, range=(lo, hi + 1.0))[0]
     return [int(v) for v in counts]
 
 

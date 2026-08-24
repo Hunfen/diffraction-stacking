@@ -502,9 +502,9 @@ def step_live_snapshot():
         check(isinstance(stats.get("histogram"), list)
               and len(stats["histogram"]) == 256
               and all(isinstance(v, int) for v in stats["histogram"]),
-              "histogram has 256 ints from the raw 12-bit frame (bin 0-255 -> ADU 0-4095)")
+              "histogram has 256 ints from the raw 12-bit frame (adaptive ADU min/max)")
         check(sum(1 for v in stats.get("histogram", []) if v) > 3,
-              "raw 12-bit histogram is not degenerate (more than 3 bins populated)")
+              "adaptive raw 12-bit histogram is not degenerate (more than 3 bins populated)")
         check(isinstance(jpeg, (bytes, bytearray)) and jpeg[:2] == b"\xff\xd8",
               "binary message right after stats is JPEG (0xFFD8)")
 
