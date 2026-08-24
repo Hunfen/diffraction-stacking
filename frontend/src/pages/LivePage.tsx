@@ -390,6 +390,8 @@ function NumericPropertyRow({
   const max = prop.max ?? 100000;
   const step = prop.step ?? 1;
   const readOnly = Boolean(prop.readonly);
+  // Exposure 使用对数滑块，把 30µs~30s 的大跨度压缩成可精细调节的滑轨。
+  const isLogScale = prop.name === 'exposure';
   const { min: sliderMin, max: sliderMax } = sliderBounds(value, min, max, step);
   // 记录最后一次从 prop 同步进来的值；本地编辑/拖动期间不覆盖 pending 值。
   const lastPropValueRef = useRef(Number(prop.value));
@@ -406,7 +408,11 @@ function NumericPropertyRow({
   const apply = useCallback(
     async (v: number) => {
       if (!Number.isFinite(v) || readOnly) return;
-      const clamped = snapNumber(v, min, max, step);
+      // 对数滑块的 step 只是 UI 展示步进，写入时不做 29999.97 这种大 UI step 吸附，
+      // 只按 min/max 钳制；后端会按相机实际 increment 处理。
+      const clamped = isLogScale
+        ? Math.min(max, Math.max(min, v))
+        : snapNumber(v, min, max, step);
       setValue(clamped);
       setEditing(false);
       // 提交期间不要让 effect 用旧的 prop 值覆盖本地 pending 值。
@@ -419,8 +425,13 @@ function NumericPropertyRow({
         setValue(Number(prop.value));
       }
     },
-    [min, max, step, readOnly, onPut, prop.name, prop.value],
+    [min, max, step, readOnly, isLogScale, onPut, prop.name, prop.value],
   );
+
+  const logMin = isLogScale ? Math.log10(Math.max(min, 1e-9)) : 0;
+  const logMax = isLogScale ? Math.log10(max) : 1;
+  const logStep = isLogScale ? (logMax - logMin) / 200 : 0.01;
+  const logValue = isLogScale ? Math.log10(Math.max(value, 1e-9)) : 0;
 
   return (
     <Row gutter={16} align="middle" style={{ marginBottom: 8 }}>
@@ -436,25 +447,46 @@ function NumericPropertyRow({
             Range {min}–{max}
             {prop.unit ? ` ${prop.unit}` : ''}
             {actual !== undefined ? ` · Actual ${String(actual)}` : ''}
-            {sliderMin !== min || sliderMax !== max
-              ? ` · Slider ${sliderMin}–${sliderMax}`
-              : ''}
+            {isLogScale
+              ? ' · Log scale'
+              : sliderMin !== min || sliderMax !== max
+                ? ` · Slider ${sliderMin}–${sliderMax}`
+                : ''}
           </Typography.Text>
         </div>
       </Col>
       <Col xs={24} md={13}>
-        <Slider
-          min={sliderMin}
-          max={sliderMax}
-          step={step}
-          value={value}
-          disabled={readOnly}
-          onChange={(v) => {
-            setEditing(true);
-            setValue(v);
-          }}
-          onAfterChange={(v) => void apply(v)}
-        />
+        {isLogScale ? (
+          <Slider
+            min={logMin}
+            max={logMax}
+            step={logStep}
+            value={logValue}
+            disabled={readOnly}
+            tooltip={{
+              formatter: (v: number | undefined) =>
+                v === undefined ? '' : String(Math.round(10 ** v)),
+            }}
+            onChange={(v) => {
+              setEditing(true);
+              setValue(10 ** v);
+            }}
+            onAfterChange={(v) => void apply(10 ** v)}
+          />
+        ) : (
+          <Slider
+            min={sliderMin}
+            max={sliderMax}
+            step={step}
+            value={value}
+            disabled={readOnly}
+            onChange={(v) => {
+              setEditing(true);
+              setValue(v);
+            }}
+            onAfterChange={(v) => void apply(v)}
+          />
+        )}
       </Col>
       <Col xs={24} md={6}>
         <InputNumber
@@ -1015,20 +1047,34 @@ export default function LivePage() {
                 {streamStarted && <Tag color="green">streaming</Tag>}
               </Space>
             }
-            extra={
-              <Space>
-                <Typography.Text type="secondary">Acquisition</Typography.Text>
-                <Switch
-                  checked={streamStarted}
-                  loading={acquisitionPending}
-                  disabled={acquisitionPending}
-                  onChange={(checked) => handleAcquisitionToggle(checked)}
-                  checkedChildren="On"
-                  unCheckedChildren="Off"
-                />
-              </Space>
-            }
           >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 8,
+              }}
+            >
+              <Space>
+                <Typography.Text strong>Acquisition</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {streamStarted
+                    ? 'Live preview running'
+                    : acquisitionPending
+                      ? 'Starting…'
+                      : 'Stopped — ROI is editable'}
+                </Typography.Text>
+              </Space>
+              <Switch
+                checked={streamStarted}
+                loading={acquisitionPending}
+                disabled={acquisitionPending}
+                onChange={(checked) => handleAcquisitionToggle(checked)}
+                checkedChildren="On"
+                unCheckedChildren="Off"
+              />
+            </div>
             <div style={{ position: 'relative', background: '#000', minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <canvas
                 ref={canvasRef}
