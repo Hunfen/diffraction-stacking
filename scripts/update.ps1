@@ -72,19 +72,29 @@ then open a new terminal and re-run this script.
 Push-Location $RootDir
 try {
     Write-Step "Checking for local changes before pulling"
-    $statusOutput = & git status --porcelain --untracked-files=all 2>$null
+    $statusOutput = & git status --porcelain --untracked-files=all -- . ':(exclude)frontend/dist' 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "git status failed (is this a Git repository?)."
     }
     if ($statusOutput) {
         Write-Fail @'
-The working tree has local changes. Refusing to pull because git fetch/pull
+The working tree has local changes outside frontend\dist. Refusing to pull because git fetch/pull
 could overwrite them.
 
 Please commit or stash your changes first, then re-run:
   .\scripts\update.ps1
 '@
     }
+
+    Write-Step "Discarding local build output in frontend\dist (it is rebuilt below)"
+    & git checkout -- frontend/dist
+    Test-ExternalExit -Step "git checkout frontend\dist"
+
+    & git clean -fdq -- frontend/dist
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "git clean frontend\dist failed (exit code $LASTEXITCODE)."
+    }
+    Write-Ok "Local build output cleared"
 
     Write-Step "Pulling latest main: git pull --ff-only origin main"
     & git pull --ff-only origin main
