@@ -2,7 +2,7 @@
 
 **Static AstroPhoto** 是面向 **LEED / RHEED 静态电子衍射点** 的采集与叠加处理软件：
 基于 **DMK 33GX249e** 工业相机采集，借用天文摄影的 **标定（Bias / Dark / Flat）+ 多帧叠加**
-方法提升弱衍射斑点的信噪比。目标静止，因此无需赤道仪、导星或去旋转。
+方法提升弱衍射斑点的信噪比。目标静止，因此无位置修正。
 
 > English: [README.en.md](README.en.md)
 
