@@ -105,6 +105,35 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+/** 数值输入提交前：先吸附到 step 网格，再夹到 [min, max]。 */
+function snapNumber(value: number, min: number, max: number, step: number): number {
+  const raw = Number.isFinite(value) ? value : min;
+  const snapped = min + Math.round((raw - min) / step) * step;
+  return clamp(snapped, min, max);
+}
+
+/**
+ * 滑块显示范围：小范围属性保留完整 min..max；大范围属性（如 exposure 30..30000000）
+ * 改为围绕当前值 ±10%（至少 5 个 step）的短窗口，避免滑块跨度过大无法精细调节。
+ */
+function sliderBounds(
+  value: number,
+  min: number,
+  max: number,
+  step: number,
+): { min: number; max: number } {
+  const range = max - min;
+  const effectiveStep = Math.max(step, 1);
+  if (range <= 0) return { min, max };
+  // 全范围“可接受”的标准：最多 200 个 step，或绝对跨度不超过 10000。
+  if (range / effectiveStep <= 200 || range <= 10000) return { min, max };
+  const halfWindow = Math.max(Math.abs(value) * 0.1, effectiveStep * 5);
+  return {
+    min: snapNumber(value - halfWindow, min, max, effectiveStep),
+    max: snapNumber(value + halfWindow, min, max, effectiveStep),
+  };
+}
+
 function roiPropertyOf(prop?: CameraProperty): RoiProperty | null {
   if (!prop) return null;
   const min = prop.min ?? 0;
@@ -354,23 +383,44 @@ function NumericPropertyRow({
   actual?: number | boolean;
   onPut: (name: string, value: number) => Promise<PropertyPutResult | undefined>;
 }) {
-  // 外部值变化由父组件 key={name:value} 触发重挂载同步，避免 effect 内 setState
   const [value, setValue] = useState<number>(() => Number(prop.value));
+  const [editing, setEditing] = useState(false);
 
   const min = prop.min ?? 0;
   const max = prop.max ?? 100000;
   const step = prop.step ?? 1;
+  const readOnly = Boolean(prop.readonly);
+  const { min: sliderMin, max: sliderMax } = sliderBounds(value, min, max, step);
+  // 记录最后一次从 prop 同步进来的值；本地编辑/拖动期间不覆盖 pending 值。
+  const lastPropValueRef = useRef(Number(prop.value));
 
-  const apply = async (v: number) => {
-    if (!Number.isFinite(v)) return;
-    const clamped = Math.min(max, Math.max(min, v));
-    setValue(clamped);
-    try {
-      await onPut(prop.name, clamped);
-    } catch {
-      setValue(Number(prop.value));
+  // 外部 prop 变化仅在非编辑状态下同步到本地 UI，避免轮询/后端回写打断用户输入。
+  useEffect(() => {
+    const next = Number(prop.value);
+    if (!editing && Number.isFinite(next) && next !== lastPropValueRef.current) {
+      setValue(next);
     }
-  };
+    lastPropValueRef.current = next;
+  }, [editing, prop.value]);
+
+  const apply = useCallback(
+    async (v: number) => {
+      if (!Number.isFinite(v) || readOnly) return;
+      const clamped = snapNumber(v, min, max, step);
+      setValue(clamped);
+      setEditing(false);
+      // 提交期间不要让 effect 用旧的 prop 值覆盖本地 pending 值。
+      lastPropValueRef.current = Number(prop.value);
+      try {
+        const result = await onPut(prop.name, clamped);
+        const actualNum = result ? Number(result.actual) : NaN;
+        if (Number.isFinite(actualNum)) setValue(actualNum);
+      } catch {
+        setValue(Number(prop.value));
+      }
+    },
+    [min, max, step, readOnly, onPut, prop.name, prop.value],
+  );
 
   return (
     <Row gutter={16} align="middle" style={{ marginBottom: 8 }}>
@@ -386,16 +436,23 @@ function NumericPropertyRow({
             Range {min}–{max}
             {prop.unit ? ` ${prop.unit}` : ''}
             {actual !== undefined ? ` · Actual ${String(actual)}` : ''}
+            {sliderMin !== min || sliderMax !== max
+              ? ` · Slider ${sliderMin}–${sliderMax}`
+              : ''}
           </Typography.Text>
         </div>
       </Col>
       <Col xs={24} md={13}>
         <Slider
-          min={min}
-          max={max}
+          min={sliderMin}
+          max={sliderMax}
           step={step}
           value={value}
-          onChange={(v) => setValue(v)}
+          disabled={readOnly}
+          onChange={(v) => {
+            setEditing(true);
+            setValue(v);
+          }}
           onAfterChange={(v) => void apply(v)}
         />
       </Col>
@@ -406,10 +463,17 @@ function NumericPropertyRow({
           step={step}
           value={value}
           addonAfter={prop.unit}
+          disabled={readOnly}
           style={{ width: '100%' }}
           onChange={(v) => {
-            if (v !== null && Number.isFinite(v)) void apply(v);
+            if (v !== null && Number.isFinite(v)) {
+              setEditing(true);
+              setValue(v);
+            }
           }}
+          onFocus={() => setEditing(true)}
+          onBlur={() => void apply(value)}
+          onPressEnter={(e) => e.currentTarget.blur()}
         />
       </Col>
     </Row>
@@ -490,9 +554,21 @@ function RoiNumberInput({
 
 export default function LivePage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mountedRef = useRef(true);
   const [stats, setStats] = useState<LiveStats | null>(null);
   const [streamStarted, setStreamStarted] = useState(false);
+  // 初始为 true：页面挂载会自动 start，期间禁用/加载 Acquisition 开关，直到自动 start 完成。
+  const [acquisitionPending, setAcquisitionPending] = useState(true);
+  // ROI 在采集启动中或采集运行中都被锁住，避免在 start 转换期间写入被采集端拒绝。
+  const acquisitionLocked = streamStarted || acquisitionPending;
   const preview = useMemo(() => getPreviewSettings(), []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const {
     properties,
     actuals,
@@ -646,8 +722,50 @@ export default function LivePage() {
     onMessage: handleMessage,
   });
 
+  // 手动开始/停止采集：都走模块级 runLiveAction 串行队列，避免 start/stop 并发竞态。
+  const startAcquisition = useCallback(async () => {
+    setAcquisitionPending(true);
+    try {
+      await runLiveAction(async () => {
+        // 先确保没有残留流，再启动。
+        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
+        if (!mountedRef.current) return;
+        await apiPost('/api/live/start', preview, { silent: true });
+        if (!mountedRef.current) return;
+        setStreamStarted(true);
+      });
+    } catch {
+      if (mountedRef.current) setStreamStarted(false);
+    } finally {
+      if (mountedRef.current) setAcquisitionPending(false);
+    }
+  }, [preview]);
+
+  const stopAcquisition = useCallback(async () => {
+    setAcquisitionPending(true);
+    try {
+      await runLiveAction(async () => {
+        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
+        if (mountedRef.current) setStreamStarted(false);
+      });
+    } catch {
+      if (mountedRef.current) setStreamStarted(false);
+    } finally {
+      if (mountedRef.current) setAcquisitionPending(false);
+    }
+  }, []);
+
+  const handleAcquisitionToggle = useCallback(
+    (next: boolean) => {
+      if (next === streamStarted || acquisitionPending) return;
+      if (next) void startAcquisition();
+      else void stopAcquisition();
+    },
+    [acquisitionPending, startAcquisition, stopAcquisition, streamStarted],
+  );
+
   // 挂载时启动实时预览，卸载时停止；自动触发用 silent（未开设备 409 不弹 toast，由页面状态提示）。
-  // start/stop 通过模块级队列串行执行，快速离开/返回时不会出现“迟到的 stop 停掉新流”。
+  // 自动 start/stop 同样通过模块级队列串行执行，快速离开/返回时不会出现“迟到的 stop 停掉新流”。
   useEffect(() => {
     let disposed = false;
     void runLiveAction(async () => {
@@ -658,6 +776,8 @@ export default function LivePage() {
       if (!disposed) setStreamStarted(true);
     }).catch(() => {
       if (!disposed) setStreamStarted(false);
+    }).finally(() => {
+      if (!disposed) setAcquisitionPending(false);
     });
     return () => {
       disposed = true;
@@ -731,12 +851,12 @@ export default function LivePage() {
   // ------------------------------------------------------------------ ROI 拖选
   const startCanvasDrag = useCallback((e: ReactMouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !roiModelRef.current.available || roiBusyRef.current) return;
+    if (!canvas || !roiModelRef.current.available || roiBusyRef.current || acquisitionLocked) return;
     const point = canvasPointFromEvent(e, canvas);
     dragStartRef.current = { x: point.x, y: point.y };
     dragRectRef.current = { x: point.x, y: point.y, w: 0, h: 0 };
     setDragging(true);
-  }, []);
+  }, [acquisitionLocked]);
 
   const moveCanvasDrag = useCallback((e: ReactMouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -764,6 +884,7 @@ export default function LivePage() {
         || !roi.offsetX
         || !roi.offsetY
         || roiBusyRef.current
+        || acquisitionLocked
       ) return;
 
       const scale = roi.scale;
@@ -796,7 +917,7 @@ export default function LivePage() {
         setRoiBusyState(false);
       }
     },
-    [putProperty, refresh, setRoiBusyState],
+    [putProperty, refresh, setRoiBusyState, acquisitionLocked],
   );
 
   const finishCanvasDrag = useCallback(() => {
@@ -822,6 +943,7 @@ export default function LivePage() {
       || !roi.offsetX
       || !roi.offsetY
       || roiBusyRef.current
+      || acquisitionLocked
     ) return;
     setRoiBusyState(true);
     try {
@@ -837,7 +959,7 @@ export default function LivePage() {
     } finally {
       setRoiBusyState(false);
     }
-  }, [putProperty, refresh, setRoiBusyState]);
+  }, [putProperty, refresh, setRoiBusyState, acquisitionLocked]);
 
   // ------------------------------------------------------------------ 顶部提示复显
   const deviceWarning = !propsLoading && deviceOpen === false;
@@ -893,8 +1015,21 @@ export default function LivePage() {
                 {streamStarted && <Tag color="green">streaming</Tag>}
               </Space>
             }
+            extra={
+              <Space>
+                <Typography.Text type="secondary">Acquisition</Typography.Text>
+                <Switch
+                  checked={streamStarted}
+                  loading={acquisitionPending}
+                  disabled={acquisitionPending}
+                  onChange={(checked) => handleAcquisitionToggle(checked)}
+                  checkedChildren="On"
+                  unCheckedChildren="Off"
+                />
+              </Space>
+            }
           >
-            <div style={{ background: '#000', minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ position: 'relative', background: '#000', minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <canvas
                 ref={canvasRef}
                 style={{
@@ -902,18 +1037,50 @@ export default function LivePage() {
                   height: 'auto',
                   display: 'block',
                   background: '#000',
-                  cursor: dragging ? 'grabbing' : roiModel.available ? 'crosshair' : 'default',
+                  cursor: acquisitionLocked ? 'not-allowed' : dragging ? 'grabbing' : roiModel.available ? 'crosshair' : 'default',
                   userSelect: 'none',
                 }}
                 onMouseDown={startCanvasDrag}
                 onMouseMove={moveCanvasDrag}
                 onMouseUp={finishCanvasDrag}
               />
-              {!stats && wsStatus !== 'open' && <Empty description="Waiting for video stream…" style={{ position: 'absolute', pointerEvents: 'none' }} />}
+              {streamStarted && !stats && wsStatus !== 'open' && (
+                <Empty description="Waiting for video stream…" style={{ position: 'absolute', pointerEvents: 'none' }} />
+              )}
+              {!streamStarted && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'rgba(0, 0, 0, 0.68)',
+                    color: '#fff',
+                    pointerEvents: 'none',
+                    zIndex: 1,
+                  }}
+                >
+                  <Space direction="vertical" align="center">
+                    <Typography.Text style={{ fontSize: 16, fontWeight: 600 }}>
+                      {acquisitionPending ? 'Starting acquisition…' : 'Acquisition stopped'}
+                    </Typography.Text>
+                    <Typography.Text type="secondary">
+                      {acquisitionPending
+                        ? 'The live preview is starting…'
+                        : 'Turn on Acquisition to resume the live preview.'}
+                    </Typography.Text>
+                  </Space>
+                </div>
+              )}
             </div>
             {roiModel.available && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Drag on the image to select the capture region; releasing the mouse converts the selection by the preview scale and writes it to the camera.
+                {streamStarted
+                  ? 'Stop acquisition before editing the capture region.'
+                  : acquisitionPending
+                    ? 'Starting acquisition — ROI editing is temporarily locked.'
+                    : 'Drag on the image to select the capture region; releasing the mouse converts the selection by the preview scale and writes it to the camera.'}
               </Typography.Text>
             )}
           </Card>
@@ -922,7 +1089,7 @@ export default function LivePage() {
         <Col xs={24} lg={8}>
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Card size="small" title="Live Stats">
-              {stats ? (
+              {streamStarted && stats ? (
                 <>
                   <Row gutter={[12, 12]}>
                     <Col span={8}>
@@ -961,7 +1128,15 @@ export default function LivePage() {
                   </div>
                 </>
               ) : (
-                <Empty description="No statistics yet" />
+                <Empty
+                  description={
+                    streamStarted
+                      ? 'Waiting for live statistics…'
+                      : acquisitionPending
+                        ? 'Starting acquisition…'
+                        : 'Acquisition stopped — no live statistics'
+                  }
+                />
               )}
             </Card>
 
@@ -1069,7 +1244,7 @@ export default function LivePage() {
               <>
                 {numericProps.map((p) => (
                   <NumericPropertyRow
-                    key={`${p.name}:${String(p.value)}`}
+                    key={p.name}
                     prop={p}
                     actual={actuals[p.name]}
                     onPut={putProperty}
@@ -1109,19 +1284,40 @@ export default function LivePage() {
                     Full-frame maximum: {roiMaxText} · Two-way sync with preview drag
                   </Typography.Text>
                 </div>
+                {streamStarted ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="Acquisition is streaming"
+                    description="Stop acquisition before changing the capture region."
+                  />
+                ) : acquisitionPending ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    Starting acquisition — ROI editing is temporarily locked.
+                  </Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    Acquisition is stopped — you can edit the capture region.
+                  </Typography.Text>
+                )}
                 <Row gutter={[12, 12]}>
                   {roiProps.map((p) => (
                     <Col xs={12} key={p.name}>
                       <RoiNumberInput
                         key={`${p.name}:${String(p.value)}`}
                         prop={p}
-                        disabled={roiBusy}
+                        disabled={roiBusy || acquisitionLocked}
                         onPut={putProperty}
                       />
                     </Col>
                   ))}
                 </Row>
-                <Button block onClick={() => void resetRoi()} loading={roiBusy}>
+                <Button
+                  block
+                  onClick={() => void resetRoi()}
+                  loading={roiBusy}
+                  disabled={acquisitionLocked}
+                >
                   Reset to Full Frame
                 </Button>
               </Space>
