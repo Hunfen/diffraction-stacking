@@ -276,6 +276,12 @@ class LiveService:
             if (self._grabber is None or not self._grabber.is_alive()) and \
                     (self._pusher is None or not self._pusher.is_alive()):
                 self._grabber = self._pusher = None
+            # 停止实际采集（IC4 stream_stop），否则 ROI 属性仍被硬件锁定。
+            try:
+                self.camera.stop_acquisition()
+            except Exception:  # noqa: BLE001
+                logging.getLogger("uvicorn.error").warning(
+                    "live stop_acquisition failed", exc_info=True)
             return {"streaming": False}
 
     def _fail(self, message: str) -> None:

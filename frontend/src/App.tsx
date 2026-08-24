@@ -1,5 +1,6 @@
-import { Layout, Menu, Typography } from 'antd';
+import { Button, Layout, Menu, Space, Typography } from 'antd';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { AcquisitionProvider, useAcquisition } from './api/acquisition';
 import ConnectPage from './pages/ConnectPage';
 import LivePage from './pages/LivePage';
 import CapturePage from './pages/CapturePage';
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
 function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { streamStarted, acquisitionPending, toggleAcquisition } = useAcquisition();
   const selected = NAV_ITEMS.some((i) => i.key === location.pathname)
     ? location.pathname
     : '/live';
@@ -35,6 +37,16 @@ function AppShell() {
           onClick={({ key }) => navigate(key)}
           style={{ flex: 1, minWidth: 0 }}
         />
+        <Space>
+          <Button
+            type={streamStarted ? 'default' : 'primary'}
+            size="small"
+            loading={acquisitionPending}
+            onClick={() => toggleAcquisition(!streamStarted)}
+          >
+            {streamStarted ? 'Stop Acquisition' : 'Start Acquisition'}
+          </Button>
+        </Space>
       </Layout.Header>
       <Layout.Content style={{ padding: 16 }}>
         <Routes>
@@ -52,5 +64,9 @@ function AppShell() {
 }
 
 export default function App() {
-  return <AppShell />;
+  return (
+    <AcquisitionProvider>
+      <AppShell />
+    </AcquisitionProvider>
+  );
 }

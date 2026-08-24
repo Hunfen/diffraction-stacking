@@ -32,6 +32,7 @@ import {
   LinkOutlined,
 } from '@ant-design/icons';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { useAcquisition } from '../api/acquisition';
 import { apiGet, apiPost, apiPut } from '../api/client';
 import { resolveUrl } from '../api/backend';
 import { getPreviewSettings } from '../api/settings';
@@ -52,18 +53,6 @@ const SNAPSHOT_PREFIX_KEY = 'ds.snapshot.prefix';
 /** 统计饱和比例告警阈值（%）。超过后视为警告，用于顶部提示自动复显。 */
 const SATURATION_WARN_THRESHOLD_PCT = 1.0;
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
-
-/**
- * 串行化 /api/live/start|stop 生命周期。
- * 快速离开/重新进入 /live 时，cleanup 的 stop 与下一次 mount 的 start 会进入同一个
- * 全局队列按序执行，避免 start 先到、迟到的 stop 再把新流停掉。
- */
-let liveLifecycle: Promise<void> = Promise.resolve();
-function runLiveAction(action: () => Promise<void>): Promise<void> {
-  const next = liveLifecycle.then(action, action);
-  liveLifecycle = next.catch(() => undefined);
-  return next;
-}
 
 /** data_root → 默认快照目录 <data_root>/snapshots。 */
 function defaultSnapshotFolder(dataRoot: string): string {
@@ -586,21 +575,17 @@ function RoiNumberInput({
 
 export default function LivePage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const mountedRef = useRef(true);
   const [stats, setStats] = useState<LiveStats | null>(null);
-  const [streamStarted, setStreamStarted] = useState(false);
-  // 初始为 true：页面挂载会自动 start，期间禁用/加载 Acquisition 开关，直到自动 start 完成。
-  const [acquisitionPending, setAcquisitionPending] = useState(true);
+  const {
+    streamStarted,
+    acquisitionPending,
+    startAcquisition,
+    stopAcquisition,
+  } = useAcquisition();
+  // Live 页每次挂载读取最新的预览参数（Settings 页修改后进入 /live 即生效）。
+  const preview = useMemo(() => getPreviewSettings(), []);
   // ROI 在采集启动中或采集运行中都被锁住，避免在 start 转换期间写入被采集端拒绝。
   const acquisitionLocked = streamStarted || acquisitionPending;
-  const preview = useMemo(() => getPreviewSettings(), []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
   const {
     properties,
     actuals,
@@ -754,70 +739,18 @@ export default function LivePage() {
     onMessage: handleMessage,
   });
 
-  // 手动开始/停止采集：都走模块级 runLiveAction 串行队列，避免 start/stop 并发竞态。
-  const startAcquisition = useCallback(async () => {
-    setAcquisitionPending(true);
-    try {
-      await runLiveAction(async () => {
-        // 先确保没有残留流，再启动。
-        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
-        if (!mountedRef.current) return;
-        await apiPost('/api/live/start', preview, { silent: true });
-        if (!mountedRef.current) return;
-        setStreamStarted(true);
-      });
-    } catch {
-      if (mountedRef.current) setStreamStarted(false);
-    } finally {
-      if (mountedRef.current) setAcquisitionPending(false);
-    }
-  }, [preview]);
-
-  const stopAcquisition = useCallback(async () => {
-    setAcquisitionPending(true);
-    try {
-      await runLiveAction(async () => {
-        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
-        if (mountedRef.current) setStreamStarted(false);
-      });
-    } catch {
-      if (mountedRef.current) setStreamStarted(false);
-    } finally {
-      if (mountedRef.current) setAcquisitionPending(false);
-    }
-  }, []);
-
-  const handleAcquisitionToggle = useCallback(
-    (next: boolean) => {
-      if (next === streamStarted || acquisitionPending) return;
-      if (next) void startAcquisition();
-      else void stopAcquisition();
-    },
-    [acquisitionPending, startAcquisition, stopAcquisition, streamStarted],
-  );
-
-  // 挂载时启动实时预览，卸载时停止；自动触发用 silent（未开设备 409 不弹 toast，由页面状态提示）。
-  // 自动 start/stop 同样通过模块级队列串行执行，快速离开/返回时不会出现“迟到的 stop 停掉新流”。
+  // 挂载时自动启动实时预览（如果全局还没在采集），卸载时停止。
+  // start/stop 已提升到全局 AcquisitionProvider，仍通过模块级队列串行化。
   useEffect(() => {
-    let disposed = false;
-    void runLiveAction(async () => {
-      // 先确保没有残留流，再启动。
-      await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
-      if (disposed) return;
-      await apiPost('/api/live/start', preview, { silent: true });
-      if (!disposed) setStreamStarted(true);
-    }).catch(() => {
-      if (!disposed) setStreamStarted(false);
-    }).finally(() => {
-      if (!disposed) setAcquisitionPending(false);
-    });
+    if (!streamStarted && !acquisitionPending) {
+      void startAcquisition();
+    }
     return () => {
-      disposed = true;
-      void runLiveAction(async () => {
-        await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
-      });
+      void stopAcquisition();
     };
-  }, [preview]);
+    // 只在挂载/卸载时执行；采集状态变化由全局 Provider 管理。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // v1.4 默认快照目录：优先 localStorage；无记忆时 GET /api/settings 取 data_root + /snapshots。
   useEffect(() => {
@@ -1048,33 +981,6 @@ export default function LivePage() {
               </Space>
             }
           >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 8,
-              }}
-            >
-              <Space>
-                <Typography.Text strong>Acquisition</Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {streamStarted
-                    ? 'Live preview running'
-                    : acquisitionPending
-                      ? 'Starting…'
-                      : 'Stopped — ROI is editable'}
-                </Typography.Text>
-              </Space>
-              <Switch
-                checked={streamStarted}
-                loading={acquisitionPending}
-                disabled={acquisitionPending}
-                onChange={(checked) => handleAcquisitionToggle(checked)}
-                checkedChildren="On"
-                unCheckedChildren="Off"
-              />
-            </div>
             <div style={{ position: 'relative', background: '#000', minHeight: 320, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <canvas
                 ref={canvasRef}
@@ -1207,11 +1113,9 @@ export default function LivePage() {
                 <div>
                   <Input
                     value={snapshotPrefix}
-                    onChange={(e) => {
-                      const next = e.target.value;
-                      setSnapshotPrefix(next);
-                      localStorage.setItem(SNAPSHOT_PREFIX_KEY, next);
-                    }}
+                    onChange={(e) => setSnapshotPrefix(e.target.value)}
+                    onBlur={() => localStorage.setItem(SNAPSHOT_PREFIX_KEY, snapshotPrefix)}
+                    onPressEnter={(e) => e.currentTarget.blur()}
                     placeholder="Prefix (optional)"
                     allowClear
                     maxLength={128}
@@ -1228,7 +1132,7 @@ export default function LivePage() {
                     onChange={setSnapshotFormat}
                     options={[
                       { value: 'fits', label: 'FITS (16-bit raw)' },
-                      { value: 'tiff', label: 'TIFF (16-bit)' },
+                      { value: 'tiff', label: 'TIFF (12-bit)' },
                       { value: 'png', label: 'PNG (8-bit auto-contrast)' },
                     ]}
                     style={{ width: 220 }}

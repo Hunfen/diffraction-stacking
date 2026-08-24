@@ -79,6 +79,13 @@ class BaseCamera:
     def grab_frame(self) -> np.ndarray:  # pragma: no cover - 子类实现
         raise NotImplementedError
 
+    def stop_acquisition(self) -> None:
+        """停止设备采集但保持设备打开（默认为空操作）。
+
+        真机（IC4）在这里调用 stream_stop，让属性从 locked 状态解除；
+        Mock 没有硬件采集锁，直接无操作即可。
+        """
+
     def get_properties(self) -> list[dict]:  # pragma: no cover - 子类实现
         raise NotImplementedError
 
@@ -760,6 +767,20 @@ class IC4Camera(BaseCamera):
                 _log.warning("ic4 device_close failed (device may be disconnected)",
                              exc_info=True)
 
+    def stop_acquisition(self) -> None:
+        """停止采集流但保持设备打开，解除 ROI 等属性的 locked 状态。"""
+        with self._lock:
+            grabber = self._grabber
+            if grabber is None or not self._opened:
+                return
+            try:
+                if grabber.is_streaming:
+                    grabber.stream_stop()
+            except Exception:  # noqa: BLE001
+                _log.warning("ic4 stream_stop failed while stopping acquisition",
+                             exc_info=True)
+            self._streaming = False
+
     def _ensure_open(self):
         if not self._opened or self._grabber is None:
             raise CameraError("Device is not open", status=409)
@@ -1113,6 +1134,12 @@ class CameraService:
             if self._device is None or not self._device.opened:
                 raise CameraError("Device is not open")
             return self._device
+
+    def stop_acquisition(self) -> None:
+        with self._lock:
+            if self._device is None or not self._device.opened:
+                return
+            self._device.stop_acquisition()
 
     def grab_frame(self) -> np.ndarray:
         return self.ensure_device().grab_frame()
