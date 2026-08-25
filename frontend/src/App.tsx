@@ -1,15 +1,18 @@
 import { Button, Layout, Menu, Space, Typography } from 'antd';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { SlidersOutlined } from '@ant-design/icons';
 import { AcquisitionProvider, useAcquisition } from './api/acquisition';
 import ConnectPage from './pages/ConnectPage';
 import LivePage from './pages/LivePage';
 import CapturePage from './pages/CapturePage';
+import ParametersPage from './pages/ParametersPage';
 import ProcessingPage from './pages/ProcessingPage';
 import SettingsPage from './pages/SettingsPage';
 
 const NAV_ITEMS = [
   { key: '/connect', label: 'Connect' },
   { key: '/live', label: 'Live Preview' },
+  { key: '/parameters', label: 'Parameters', icon: <SlidersOutlined /> },
   { key: '/capture', label: 'Capture' },
   { key: '/processing', label: 'Processing' },
   { key: '/settings', label: 'Settings' },
@@ -53,6 +56,7 @@ function AppShell() {
           <Route path="/" element={<Navigate to="/live" replace />} />
           <Route path="/connect" element={<ConnectPage />} />
           <Route path="/live" element={<LivePage />} />
+          <Route path="/parameters" element={<ParametersPage />} />
           <Route path="/capture" element={<CapturePage />} />
           <Route path="/processing" element={<ProcessingPage />} />
           <Route path="/settings" element={<SettingsPage />} />

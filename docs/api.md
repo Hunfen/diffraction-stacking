@@ -150,6 +150,36 @@
 - 越界值自动钳制到 min/max，`actual` 为相机实际生效值
 - 未打开设备返回 409
 
+**GET /api/properties/all**（Parameters 标签页专用，返回相机**全部**可控参数）
+
+```json
+{ "ok": true, "data": { "properties": [
+  { "name": "ExposureTime", "label": "Exposure Time", "value": 20000, "type": "float",
+    "min": 30, "max": 30000000, "step": 1, "unit": "us",
+    "readonly": false, "locked": false, "available": true, "visibility": "BEGINNER" },
+  { "name": "PixelFormat", "label": "Pixel Format", "value": "Mono16", "type": "enum",
+    "options": ["Mono8", "Mono12Packed", "Mono16"],
+    "readonly": false, "locked": false, "available": true, "visibility": "BEGINNER" },
+  { "name": "DeviceUserID", "label": "Device User ID", "value": "", "type": "string",
+    "readonly": false, "locked": false, "available": true, "visibility": "BEGINNER" },
+  { "name": "TriggerSoftware", "label": "Trigger Software", "value": null, "type": "command",
+    "readonly": false, "locked": false, "available": true, "visibility": "BEGINNER" }
+], "error": null }
+```
+
+扩展形状（向后兼容 §2.3 的属性对象）：
+- `type` 在 `int|float|bool|enum` 基础上增加 `string` 与 `command`；`value` 可为 `string|null`
+  （除 number/boolean 外）
+- 新增可选字段：`locked`(bool，采集/自动控制锁定)、`available`(bool，当前是否可用)、
+  `visibility`(string：`BEGINNER|EXPERT|GURU|INVISIBLE`，仅 UI 建议，与可写性无关)
+- 数值型 `int/float` 带 `min/max/step/unit`；`enum` 带 `options`；`string`/`command` 无 range
+
+**PUT /api/properties/{name}** 对任意属性名与全部类型通用：
+- `int/float`：数值校验 + min/max 钳制 + increment 对齐；`bool`：On/Off/true/false 兼容；
+  `enum`：校验 options；`string`：直接透传；`command`：执行命令（返回 `actual:null`）
+- 响应：`{ "ok": true, "data": { "name": "<name>", "value": <请求值>, "actual": <生效值> } }`
+- `actual` 类型与属性类型一致（可为 string/null）；readonly→400、locked→409、unavailable→409
+
 ### 2.4 实时预览、目录浏览与抓拍
 
 **POST /api/live/start** — body `{ "fps": 15, "scale": 1.0, "quality": 80 }`

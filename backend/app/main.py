@@ -611,6 +611,15 @@ def properties():
         raise_cam_err(exc)
 
 
+@app.get("/api/properties/all")
+def properties_all():
+    """全部相机参数（扩展形状），供 Parameters 标签页使用。"""
+    try:
+        return ok({"properties": camera_service.get_all_properties()})
+    except Exception as exc:  # noqa: BLE001
+        raise_cam_err(exc)
+
+
 @app.put("/api/properties/{name}")
 def set_property(name: str, body: PropertyBody):
     try:

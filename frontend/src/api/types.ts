@@ -34,14 +34,20 @@ export interface DeviceInfo {
 export interface CameraProperty {
   name: string;
   label: string;
-  value: number | boolean;
+  value: number | boolean | string | null;
   min?: number;
   max?: number;
   step?: number;
   unit?: string;
   readonly: boolean;
-  type: 'int' | 'float' | 'bool' | 'enum';
+  type: 'int' | 'float' | 'bool' | 'enum' | 'string' | 'command';
   options?: string[];
+  /** 相机属性被采集/自动控制锁定时为 true，锁定时不可写 */
+  locked?: boolean;
+  /** 当前是否可用（false 时控件禁用）；缺省视为可用 */
+  available?: boolean;
+  /** IC4/GenICam visibility（UI 建议值，如 Beginner/Expert/Guru/Invisible，与可写无关） */
+  visibility?: string;
 }
 
 export interface PropertiesData {
@@ -52,6 +58,13 @@ export interface PropertyPutResult {
   name: string;
   value: number | boolean;
   actual: number | boolean;
+}
+
+/** PUT /api/properties/{name} 的扩展返回（Parameters 页用于 enum/string/command 等） */
+export interface PropertySetResult {
+  name: string;
+  value: number | boolean | string | null;
+  actual: number | boolean | string | null;
 }
 
 export interface LiveStartParams {

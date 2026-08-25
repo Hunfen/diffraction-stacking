@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
@@ -14,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from .util import MAX_ADU
+from .util import MAX_ADU, REPO_ROOT
 
 _log = logging.getLogger(__name__)
 
@@ -57,6 +58,45 @@ def _prop(name, label, value, ptype, *, min_=None, max_=None, step=None,
     return p
 
 
+# 扩展属性形状（Parameters 标签页 / GET /api/properties/all）：
+# 在 _prop 基础上增加 type=string/command、value=string|null、以及
+# locked/available/visibility 三个可选字段。
+def _prop_all(name, label, value, ptype, *, min_=None, max_=None, step=None,
+              unit="", readonly=False, options=None, locked=False,
+              available=True, visibility=None):
+    p = {"name": name, "label": label, "value": value, "type": ptype,
+         "readonly": readonly, "locked": locked, "available": available}
+    if visibility:
+        p["visibility"] = visibility
+    if ptype in ("int", "float"):
+        p["min"] = min_
+        p["max"] = max_
+        p["step"] = step
+        p["unit"] = unit
+    elif ptype == "enum":
+        p["options"] = options or []
+    return p
+
+
+# GenICam 属性类型 → 扩展形状 type（与 dump_camera_props.py 的 _TYPE_MAP 对齐）。
+_GENICAM_TYPE_MAP = {
+    "INTEGER": "int",
+    "FLOAT": "float",
+    "ENUMERATION": "enum",
+    "ENUM": "enum",
+    "BOOLEAN": "bool",
+    "BOOL": "bool",
+    "STRING": "string",
+    "COMMAND": "command",
+    # Category/Register/Entry/Port 节点无标量值，按 string+null 呈现（不可写）。
+    "CATEGORY": "string",
+    "REGISTER": "string",
+    "ENUMENTRY": "string",
+    "PORT": "string",
+    "UNKNOWN": "string",
+}
+
+
 class BaseCamera:
     kind = ""
 
@@ -89,6 +129,10 @@ class BaseCamera:
     def get_properties(self) -> list[dict]:  # pragma: no cover - 子类实现
         raise NotImplementedError
 
+    def get_all_properties(self) -> list[dict]:  # pragma: no cover - 子类实现
+        """返回相机【全部】可控参数（扩展形状），供 Parameters 标签页使用。"""
+        raise NotImplementedError
+
     def get_property(self, name: str) -> Any:
         for p in self.get_properties():
             if p["name"] == name:
@@ -117,6 +161,29 @@ class MockCamera(BaseCamera):
 
     kind = "mock"
 
+    # GenICam 原始属性名 → 已模拟的 snake_case 键（get_all_properties/get_property/
+    # set_property 都按此映射把两者同步）。Exposure 是 PropId EXPOSURE_TIME 的别名，
+    # JSON 里实际叫 ExposureTime，两者都映射到 exposure。
+    _GENICAM_TO_SNAKE = {
+        "Exposure": "exposure",
+        "ExposureTime": "exposure",
+        "Gain": "gain",
+        "BlackLevel": "black_level",
+        "Width": "width",
+        "Height": "height",
+        "OffsetX": "offset_x",
+        "OffsetY": "offset_y",
+        "ReverseX": "reverse_x",
+        "ReverseY": "reverse_y",
+        "TriggerMode": "trigger_mode",
+        "ExposureAuto": "auto_exposure",
+        "GainAuto": "auto_gain",
+        "DeviceTemperature": "device_temperature",
+    }
+    # 仅存在于 Mock、不属于真实相机参数（不出现在 /all 的正常路径里）。
+    _MOCK_ONLY_PROPS = frozenset(("mock_pattern", "mock_scene", "mock_drift"))
+    _PROPS_JSON = REPO_ROOT / "docs" / "dmk-33gx249e-camera-props.json"
+
     def __init__(self):
         super().__init__(MOCK_ID, MOCK_NAME, MOCK_SERIAL)
         self._lock = threading.RLock()
@@ -128,6 +195,9 @@ class MockCamera(BaseCamera):
         self._base_cache: dict[str, np.ndarray] = {}
         self._drift_cache: dict[str, tuple] = {}
         self._hot_full = self._make_hot_pixels()
+        # 扩展属性（JSON 里未映射到 snake_case 的“其余”属性），惰性加载。
+        self._json_props: list[dict] | None = None
+        self._extra_props: dict[str, dict] | None = None
 
         self._props: dict[str, dict] = {
             "exposure": _prop("exposure", "Exposure", 20000, "int",
@@ -187,46 +257,203 @@ class MockCamera(BaseCamera):
 
     def get_property(self, name: str) -> Any:
         with self._lock:
-            if name not in self._props:
-                raise CameraError(f"Unknown property: {name}")
-            if name == "device_temperature":
-                return self._temperature()
-            return self._props[name]["value"]
+            snake = self._GENICAM_TO_SNAKE.get(name, name)
+            if snake in self._props:
+                if snake == "device_temperature":
+                    return self._temperature()
+                return self._props[snake]["value"]
+            extra = self._ensure_extra_props()
+            if name in extra:
+                return extra[name]["value"]
+            raise CameraError(f"Unknown property: {name}")
 
     def set_property(self, name: str, value: Any) -> Any:
         with self._lock:
-            if name not in self._props:
-                raise CameraError(f"Unknown property: {name}")
-            p = self._props[name]
-            if p["readonly"]:
-                raise CameraError(f"Property {name} is read-only")
-            # Manual exposure/gain control disables the corresponding auto
-            # control first (mirrors the DMK 33GX249e behavior).
-            if name == "exposure" and self._props["auto_exposure"]["value"]:
-                self._props["auto_exposure"]["value"] = False
-            if name == "gain" and self._props["auto_gain"]["value"]:
-                self._props["auto_gain"]["value"] = False
-            ptype = p["type"]
-            if ptype in ("int", "float"):
-                try:
-                    v = float(value)
-                except (TypeError, ValueError):
-                    raise CameraError(f"Property {name} requires a numeric value")
-                v = min(max(v, float(p["min"])), float(p["max"]))
-                actual = int(round(v)) if ptype == "int" else round(v, 3)
-            elif ptype == "bool":
-                actual = bool(value)
-            elif ptype == "enum":
-                if value not in p["options"]:
-                    raise CameraError(f"Property {name} only supports: {', '.join(p['options'])}")
-                actual = value
-            else:
-                raise CameraError(f"Unsupported property type: {ptype}")
+            snake = self._GENICAM_TO_SNAKE.get(name, name)
+            if snake in self._props:
+                return self._set_mock_prop(snake, value)
+            extra = self._ensure_extra_props()
+            if name in extra:
+                return self._set_extra_prop(name, value)
+            raise CameraError(f"Unknown property: {name}")
 
-            p["value"] = actual
-            if name in ("width", "height", "offset_x", "offset_y"):
-                self._clamp_offsets()
-            return actual
+    def _set_mock_prop(self, name: str, value: Any) -> Any:
+        """现有 13 个 snake_case 契约属性（及 mock 专属属性）的读写路径，保持不变。"""
+        p = self._props[name]
+        if p["readonly"]:
+            raise CameraError(f"Property {name} is read-only")
+        # Manual exposure/gain control disables the corresponding auto
+        # control first (mirrors the DMK 33GX249e behavior).
+        if name == "exposure" and self._props["auto_exposure"]["value"]:
+            self._props["auto_exposure"]["value"] = False
+        if name == "gain" and self._props["auto_gain"]["value"]:
+            self._props["auto_gain"]["value"] = False
+        ptype = p["type"]
+        if ptype in ("int", "float"):
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                raise CameraError(f"Property {name} requires a numeric value")
+            v = min(max(v, float(p["min"])), float(p["max"]))
+            actual = int(round(v)) if ptype == "int" else round(v, 3)
+        elif ptype == "bool":
+            actual = bool(value)
+        elif ptype == "enum":
+            if value not in p["options"]:
+                raise CameraError(f"Property {name} only supports: {', '.join(p['options'])}")
+            actual = value
+        else:
+            raise CameraError(f"Unsupported property type: {ptype}")
+
+        p["value"] = actual
+        if name in ("width", "height", "offset_x", "offset_y"):
+            self._clamp_offsets()
+        return actual
+
+    # ------------------------------------------------- 扩展属性（Parameters 标签页）
+    def get_all_properties(self) -> list[dict]:
+        """返回相机【全部】可控参数（扩展形状），供 Parameters 标签页使用。
+
+        正常路径：从 docs/dmk-33gx249e-camera-props.json 加载 164 个属性，
+        已映射的 GenICam 名转成 snake_case 键并同步到模拟值；其余属性用
+        ``self._extra_props`` 存/取当前值（对帧无影响）。JSON 缺失时优雅回退
+        到现有模拟属性（仍以扩展形状输出，不抛异常）。
+        """
+        with self._lock:
+            extra = self._ensure_extra_props()
+            raw = self._load_json_props()
+            result: list[dict] = []
+            if raw:
+                seen: set[str] = set()
+                for p in raw:
+                    gname = p.get("name") or ""
+                    snake = self._GENICAM_TO_SNAKE.get(gname)
+                    if snake and snake in self._props:
+                        result.append(self._merged_prop(snake, p))
+                        seen.add(snake)
+                    elif gname in extra:
+                        result.append(dict(extra[gname]))
+                        seen.add(gname)
+                # 兜底：JSON 里缺了某个契约属性时，仍把模拟定义补上。
+                for snake in self._props:
+                    if snake in self._MOCK_ONLY_PROPS or snake in seen:
+                        continue
+                    result.append(self._merged_prop(snake, None))
+                return result
+            # 优雅回退：无 JSON → 现有模拟属性转扩展形状。
+            return [self._merged_prop(snake, None) for snake in self._props]
+
+    def _load_json_props(self) -> list[dict] | None:
+        if self._json_props is not None:
+            return self._json_props or None
+        props: list[dict] = []
+        try:
+            data = json.loads(self._PROPS_JSON.read_text(encoding="utf-8"))
+            props = [p for p in (data.get("properties") or [])
+                     if isinstance(p, dict)]
+        except Exception as exc:  # noqa: BLE001 - 缺文件/损坏时回退，不抛异常
+            _log.warning("mock properties JSON unavailable (%s), falling back", exc)
+        self._json_props = props
+        return props or None
+
+    def _ensure_extra_props(self) -> dict[str, dict]:
+        """惰性把 JSON 里未映射的属性转成扩展形状（键 = GenICam 名）。"""
+        if self._extra_props is not None:
+            return self._extra_props
+        extra: dict[str, dict] = {}
+        raw = self._load_json_props()
+        if raw:
+            for p in raw:
+                gname = p.get("name") or ""
+                if gname in self._GENICAM_TO_SNAKE:
+                    continue
+                extra[gname] = self._json_to_extended(p)
+        self._extra_props = extra
+        return extra
+
+    @staticmethod
+    def _json_to_extended(p: dict) -> dict:
+        """把 dump JSON 里的单个属性转成扩展形状（保留当前值）。"""
+        ptype = _GENICAM_TYPE_MAP.get(str(p.get("type", "")).upper(), "string")
+        name = p.get("name") or ""
+        entry = _prop_all(
+            name, p.get("display_name") or name, p.get("value"), ptype,
+            readonly=bool(p.get("is_readonly")),
+            locked=bool(p.get("is_locked")),
+            available=bool(p.get("is_available", True)),
+            visibility=p.get("visibility") or None,
+        )
+        if ptype in ("int", "float"):
+            inc = p.get("increment")
+            entry["min"] = p.get("min")
+            entry["max"] = p.get("max")
+            entry["step"] = inc if inc is not None else (1 if ptype == "int" else None)
+            entry["unit"] = p.get("unit") or ""
+        elif ptype == "enum":
+            entry["options"] = [str(o) for o in (p.get("valid_value_set") or [])]
+        return entry
+
+    def _merged_prop(self, snake: str, json_p: dict | None) -> dict:
+        """把模拟契约属性与 JSON 元数据合并成扩展形状（值取模拟实时值）。"""
+        base = dict(self._props[snake])
+        if snake == "device_temperature":
+            base["value"] = self._temperature()
+        base["locked"] = bool(json_p.get("is_locked")) if json_p else False
+        base["available"] = bool(json_p.get("is_available", True)) if json_p else True
+        if json_p:
+            vis = json_p.get("visibility")
+            if vis:
+                base["visibility"] = str(vis)
+        return base
+
+    def _set_extra_prop(self, name: str, value: Any) -> Any:
+        """设置“其余”属性（JSON 里未映射到 snake_case 的属性）。"""
+        entry = self._ensure_extra_props()[name]
+        if entry["readonly"]:
+            raise CameraError(f"Property {name} is read-only", status=400)
+        ptype = entry["type"]
+        if ptype == "command":
+            return None  # Mock 执行命令是无操作，契约 actual=null
+        if ptype == "string":
+            actual = str(value)
+        elif ptype == "bool":
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "on", "1", "yes"):
+                    actual = True
+                elif v in ("false", "off", "0", "no"):
+                    actual = False
+                else:
+                    raise CameraError(f"Property {name} requires a boolean value",
+                                      status=400)
+            else:
+                if not isinstance(value, (bool, int, float)):
+                    raise CameraError(f"Property {name} requires a boolean value",
+                                      status=400)
+                actual = bool(value)
+        elif ptype == "enum":
+            options = entry.get("options", [])
+            if value not in options:
+                raise CameraError(f"Property {name} only supports: {', '.join(options)}",
+                                  status=400)
+            actual = value
+        elif ptype in ("int", "float"):
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                raise CameraError(f"Property {name} requires a numeric value", status=400)
+            lo = entry.get("min")
+            hi = entry.get("max")
+            if lo is not None and hi is not None:
+                try:
+                    v = min(max(v, float(lo)), float(hi))
+                except (TypeError, ValueError):
+                    pass
+            actual = int(round(v)) if ptype == "int" else float(v)
+        else:
+            raise CameraError(f"Unsupported property type: {ptype}", status=400)
+        entry["value"] = actual
+        return actual
 
     def _clamp_offsets(self) -> None:
         w = int(self._props["width"]["value"])
@@ -974,10 +1201,198 @@ class IC4Camera(BaseCamera):
                     continue
             return props
 
+    # --------------------------------------------------- 全量属性（Parameters 标签页）
+    def get_all_properties(self) -> list[dict]:
+        """通用枚举全部相机属性并转成扩展形状（参照 scripts/dump_camera_props.py）。
+
+        首选 ``PropertyMap.all`` / ``iter(pmap)`` 全量遍历；遍历不到时回退到
+        13 个 _SPEC 契约属性（补上 locked/available/visibility）。单个属性读取
+        失败只跳过并记录 warning，不拖垮整个列表。
+        """
+        with self._lock:
+            pmap = self._pmap()
+            lib = self._lib
+            prop_objs = self._enumerate_all_props(pmap)
+            if not prop_objs:
+                return self._spec_extended_props(pmap)
+            out: list[dict] = []
+            for prop in prop_objs:
+                try:
+                    entry = self._read_all_prop(pmap, prop, lib)
+                    if entry is not None:
+                        out.append(entry)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("ic4 property %s skipped: %s",
+                                 getattr(prop, "name", prop), exc)
+                    continue
+            return out
+
+    @staticmethod
+    def _enumerate_all_props(pmap) -> list:
+        """尽量返回 PropertyMap 里的全部属性对象（与 dump 脚本同思路）。"""
+        all_attr = getattr(pmap, "all", None)
+        if all_attr is not None:
+            try:
+                props = list(all_attr() if callable(all_attr) else all_attr)
+                if props:
+                    return props
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            props = list(iter(pmap))
+            if props:
+                return props
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    @staticmethod
+    def _all_type(prop, lib) -> str:
+        """按类型判别属性（先判更具体的 Enum/Command/Boolean/String 再判数值）。"""
+        for cls_name, out in (("PropEnumeration", "enum"),
+                              ("PropCommand", "command"),
+                              ("PropBoolean", "bool"),
+                              ("PropString", "string"),
+                              ("PropFloat", "float"),
+                              ("PropInteger", "int")):
+            cls = getattr(lib, cls_name, None)
+            if cls is not None and isinstance(prop, cls):
+                return out
+        tname = str(getattr(prop, "type", "")).upper()
+        return _GENICAM_TYPE_MAP.get(tname, "string")
+
+    @staticmethod
+    def _visibility_text(prop) -> str | None:
+        try:
+            vis = prop.visibility
+        except Exception:  # noqa: BLE001
+            return None
+        if vis is None:
+            return None
+        if isinstance(vis, str):
+            return vis
+        name = getattr(vis, "name", None)
+        return str(name if name is not None else vis)
+
+    @staticmethod
+    def _finite_or_none(value):
+        """转 JSON 安全的数值；非有限/不可转换返回 None。"""
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f):
+            return None
+        if isinstance(value, int) or (isinstance(value, float) and f.is_integer()):
+            return int(f)
+        return f
+
+    @staticmethod
+    def _read_all_value(prop, pmap, ptype: str):
+        """按类型读取单个属性当前值（command 恒返回 None）。"""
+        if ptype == "command":
+            return None
+        raw = None
+        try:
+            raw = prop.value
+        except Exception:  # noqa: BLE001
+            raw = None
+        if raw is None:
+            name = getattr(prop, "name", None)
+            if name:
+                try:
+                    raw = pmap.get_value_str(name)
+                except Exception:  # noqa: BLE001
+                    raw = None
+        if raw is None:
+            return None  # 读不到值 → value=null，不要误报 False/"None"
+        if ptype == "bool":
+            if isinstance(raw, str):
+                return raw.strip().lower() in ("true", "on", "1", "yes")
+            return bool(raw)
+        if ptype == "int":
+            try:
+                return int(round(float(raw)))
+            except (TypeError, ValueError):
+                return None
+        if ptype == "float":
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        if ptype == "enum":
+            n = getattr(raw, "name", None)
+            return str(n if n is not None else raw)
+        if ptype == "string":
+            return str(raw)
+        return None
+
+    def _read_all_prop(self, pmap, prop, lib) -> dict | None:
+        """把一个 IC4 属性对象转成扩展形状；读不出名字/类型则跳过。"""
+        try:
+            name = str(prop.name or "")
+        except Exception:  # noqa: BLE001
+            return None
+        if not name:
+            return None
+        ptype = self._all_type(prop, lib)
+        label = str(getattr(prop, "display_name", "") or name)
+        entry = _prop_all(
+            name, label, None, ptype,
+            readonly=bool(getattr(prop, "is_readonly", False)),
+            locked=bool(getattr(prop, "is_locked", False)),
+            available=bool(getattr(prop, "is_available", True)),
+            visibility=self._visibility_text(prop),
+        )
+        if ptype in ("int", "float"):
+            entry["min"] = self._finite_or_none(getattr(prop, "minimum", None))
+            entry["max"] = self._finite_or_none(getattr(prop, "maximum", None))
+            entry["unit"] = self._prop_unit(prop)
+            step = 1.0
+            try:
+                mode = prop.increment_mode
+            except Exception:  # noqa: BLE001
+                mode = None
+            inc_enum = getattr(lib, "PropertyIncrementMode", None)
+            if inc_enum is not None and mode == inc_enum.INCREMENT:
+                step = self._finite_or_none(getattr(prop, "increment", None)) or 1.0
+            elif ptype == "float":
+                step = None
+            entry["step"] = step
+        elif ptype == "enum":
+            options: list[str] = []
+            try:
+                for e in prop.entries:
+                    options.append(str(getattr(e, "name", e)))
+            except Exception:  # noqa: BLE001
+                options = []
+            entry["options"] = options
+        if entry["available"]:
+            entry["value"] = self._read_all_value(prop, pmap, ptype)
+        return entry
+
+    def _spec_extended_props(self, pmap) -> list[dict]:
+        """全量遍历不可用时的回退：13 个契约属性 + 扩展元数据。"""
+        out: list[dict] = []
+        for name in (s[0] for s in self._SPEC):
+            try:
+                base = self._read_prop(pmap, name)
+                prop = pmap.find(self._pid(name))
+                base.setdefault("available", bool(getattr(prop, "is_available", True)))
+                base.setdefault("locked", bool(getattr(prop, "is_locked", False)))
+                vis = self._visibility_text(prop)
+                if vis:
+                    base["visibility"] = vis
+                out.append(base)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("ic4 property %s skipped: %s", name, exc)
+                continue
+        return out
+
     def get_property(self, name: str) -> Any:
         with self._lock:
             if name not in self._SPEC_BY_NAME:
-                raise CameraError(f"Unknown property: {name}", status=400)
+                return self._get_any_prop(name)
             try:
                 return self._read_prop(self._pmap(), name)["value"]
             except CameraError:
@@ -1029,7 +1444,7 @@ class IC4Camera(BaseCamera):
         with self._lock:
             grabber = self._ensure_open()
             if name not in self._SPEC_BY_NAME:
-                raise CameraError(f"Unknown property: {name}", status=400)
+                return self._set_any_prop(grabber, name, value)
             if name in self._READONLY_NAMES:
                 raise CameraError(f"Property {name} is read-only", status=400)
             _, _, ptype, _label, _unit = self._SPEC_BY_NAME[name]
@@ -1084,6 +1499,145 @@ class IC4Camera(BaseCamera):
             except Exception as exc:  # noqa: BLE001
                 raise CameraError(f"Failed to read back property {name} after setting it: {exc}",
                                   status=_ic4_exc_status(exc) or 500)
+
+    # ------------------------------------------- 任意属性名 / 任意类型的读写
+    def _find_prop_by_name(self, pmap, name: str):
+        """按名字找属性对象：先全量遍历匹配，再退回 PropId 常量。"""
+        for prop in self._enumerate_all_props(pmap):
+            try:
+                if str(prop.name) == name:
+                    return prop
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            pid = getattr(self._lib.PropId, name, None)
+            if pid is not None:
+                return pmap.find(pid)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _get_any_prop(self, name: str) -> Any:
+        pmap = self._pmap()
+        prop = self._find_prop_by_name(pmap, name)
+        if prop is None:
+            raise CameraError(f"Unknown property: {name}", status=400)
+        if not bool(getattr(prop, "is_available", True)):
+            raise CameraError(f"Property {name} is currently unavailable", status=409)
+        return self._read_all_value(prop, pmap, self._all_type(prop, self._lib))
+
+    def _coerce_any_value(self, prop, name: str, value: Any, ptype: str):
+        lib = self._lib
+        if ptype == "bool":
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "on", "1", "yes"):
+                    return True
+                if v in ("false", "off", "0", "no"):
+                    return False
+                raise CameraError(f"Property {name} requires a boolean value", status=400)
+            if not isinstance(value, (bool, int, float)):
+                raise CameraError(f"Property {name} requires a boolean value", status=400)
+            return bool(value)
+        if ptype == "string":
+            return str(value)
+        if ptype == "enum":
+            options: list[str] = []
+            try:
+                options = [str(getattr(e, "name", e)) for e in prop.entries]
+            except Exception:  # noqa: BLE001
+                options = []
+            sval = str(value)
+            if options and sval not in options:
+                raise CameraError(
+                    f"Property {name} only supports: {', '.join(options)}", status=400)
+            return sval
+        if ptype in ("int", "float"):
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                raise CameraError(f"Property {name} requires a numeric value", status=400)
+            try:
+                lo = float(prop.minimum)
+            except Exception:  # noqa: BLE001
+                lo = v
+            try:
+                hi = float(prop.maximum)
+            except Exception:  # noqa: BLE001
+                hi = v
+            if math.isfinite(lo) and math.isfinite(hi) and lo < hi:
+                v = min(max(v, lo), hi)
+            inc_enum = getattr(lib, "PropertyIncrementMode", None)
+            try:
+                mode = prop.increment_mode
+            except Exception:  # noqa: BLE001
+                mode = None
+            if inc_enum is not None and mode == inc_enum.INCREMENT:
+                try:
+                    inc = float(prop.increment)
+                    if inc > 0 and math.isfinite(lo) and math.isfinite(hi):
+                        v = lo + round((v - lo) / inc) * inc
+                except Exception:  # noqa: BLE001
+                    pass
+            if math.isfinite(lo) and math.isfinite(hi) and lo < hi:
+                v = min(max(v, lo), hi)
+            return int(round(v)) if ptype == "int" else float(v)
+        raise CameraError(f"Unsupported property type: {ptype}", status=400)
+
+    def _set_any_prop(self, grabber, name: str, value: Any) -> Any:
+        lib = self._lib
+        pmap = grabber.device_property_map
+        prop = self._find_prop_by_name(pmap, name)
+        if prop is None:
+            raise CameraError(f"Unknown property: {name}", status=400)
+        if not bool(getattr(prop, "is_available", True)):
+            raise CameraError(f"Property {name} is currently unavailable", status=409)
+        if bool(getattr(prop, "is_readonly", False)):
+            raise CameraError(f"Property {name} is read-only", status=400)
+        if bool(getattr(prop, "is_locked", False)):
+            raise CameraError(
+                f"Property {name} is locked. Stop acquisition or disable auto control first.",
+                status=409)
+        ptype = self._all_type(prop, lib)
+        if ptype == "command":
+            try:
+                execute = getattr(prop, "execute", None)
+                if callable(execute):
+                    execute()
+                else:
+                    pmap.set_value(name, True)
+            except CameraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise CameraError(f"Failed to execute command {name}: {exc}",
+                                  status=_ic4_exc_status(exc) or 400)
+            return None  # command 执行后 actual=null
+        actual = self._coerce_any_value(prop, name, value, ptype)
+        try:
+            if ptype == "bool":
+                try:
+                    pmap.set_value(name, actual)
+                except Exception:  # noqa: BLE001
+                    candidates = (["On", "True", "1"] if actual
+                                  else ["Off", "False", "0"])
+                    for cand in candidates:
+                        try:
+                            pmap.set_value(name, cand)
+                            break
+                        except Exception:  # noqa: BLE001
+                            continue
+                    else:
+                        raise CameraError(
+                            f"Failed to set property {name}: no matching value "
+                            f"for boolean {actual}", status=400)
+            else:
+                pmap.set_value(name, actual)
+        except CameraError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise CameraError(f"Failed to set property {name}: {exc}",
+                              status=_ic4_exc_status(exc) or 400)
+        return self._read_all_value(prop, pmap, ptype)
 
 
 class CameraService:
@@ -1171,6 +1725,9 @@ class CameraService:
 
     def get_properties(self) -> list[dict]:
         return self.ensure_device().get_properties()
+
+    def get_all_properties(self) -> list[dict]:
+        return self.ensure_device().get_all_properties()
 
     def get_property(self, name: str) -> Any:
         return self.ensure_device().get_property(name)
