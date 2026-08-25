@@ -72,6 +72,67 @@ def _exc_text(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {exc}"
 
 
+def _is_backend_running(timeout: float = 1.5) -> bool:
+    """Best-effort stdlib check for a Static AstroPhoto backend on port 8000.
+
+    Returns True only when ``http://127.0.0.1:8000/api/health`` answers with
+    HTTP 200.  Uses only :mod:`urllib.request` and never raises: any network
+    error simply means "no backend detected".
+    """
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8000/api/health", timeout=timeout
+        ) as resp:
+            return resp.status == 200
+    except Exception:  # noqa: BLE001 - best-effort probe, never fail the dump
+        return False
+
+
+def _is_open_permission_error(exc: Exception) -> bool:
+    """Detect the ic4 "permission denied" device-open failure.
+
+    Recognises the structured error (``ErrorCode.DriverError`` with value 6)
+    as well as the message text ("permission denied" / "failed to open device"),
+    so detection keeps working no matter how the installed imagingcontrol4
+    build surfaces the error.
+    """
+    code = getattr(exc, "error_code", None)
+    if code is None:
+        code = getattr(exc, "code", None)
+    if code is not None:
+        name = getattr(code, "name", None)
+        try:
+            value = int(code)
+        except (TypeError, ValueError):
+            value = None
+        if name == "DriverError" or value == 6:
+            return True
+    text = str(exc).lower()
+    return "permission denied" in text or "failed to open device" in text
+
+
+_OPEN_PERMISSION_HELP = (
+    "无法打开相机：权限被拒绝（ic4 DriverError / permission denied）。\n"
+    "可能的原因与处理步骤：\n"
+    "  1. 相机已被其他程序独占打开，最常见的是本项目的 Static AstroPhoto "
+    "后端仍在运行（后端启动时会独占相机）。\n"
+    "     请先执行 .\\scripts\\run.ps1 -Stop（或关闭占用相机的其他程序），"
+    "再重试本脚本。\n"
+    "  2. ic4 驱动/GenTL producer 未安装，或 GigE 网卡未绑定（请启用巨型帧 "
+    "jumbo frames，并确认网卡已绑定 ic4 GigE producer）。\n"
+    "  3. 当前进程没有访问该设备的权限（相机可能被其他用户/会话占用）。\n"
+    "  4. 若本机有多个相机，可用 --device-index N 选择其他设备重试。\n"
+)
+
+
+def _print_open_permission_help(exc: Exception) -> None:
+    """Print actionable guidance for a permission-denied open, then the raw error."""
+    print(_OPEN_PERMISSION_HELP, file=sys.stderr)
+    print(f"原始异常: {exc.__class__.__name__}: {exc!r}", file=sys.stderr)
+
+
 def _call_or_value(value: Any) -> Any:
     """Call ``value`` if it is a callable, otherwise return it unchanged."""
     return value() if callable(value) else value
@@ -479,8 +540,21 @@ def _main(argv: Sequence[str] | None = None) -> int:
     # ----------------------------------------------------------------- Open
     grabber = None
     try:
+        if _is_backend_running():
+            print(
+                "检测到本机 8000 端口已有 Static AstroPhoto 后端运行，它会独占相机；"
+                "建议先执行 .\\scripts\\run.ps1 -Stop 再重试。",
+                file=sys.stderr,
+            )
+
         grabber = ic4.Grabber()
-        grabber.device_open(dev)
+        try:
+            grabber.device_open(dev)
+        except Exception as exc:  # noqa: BLE001 - turn the common failure into guidance
+            if _is_open_permission_error(exc):
+                _print_open_permission_help(exc)
+                return 1
+            raise
         pmap = grabber.device_property_map
 
         # ----------------------------------------------------- Enumerate
