@@ -87,12 +87,9 @@ Please commit or stash your changes first, then re-run:
     }
 
     Write-Step "Discarding local build output in frontend\dist (it is rebuilt below)"
-    & git checkout -- frontend/dist
-    Test-ExternalExit -Step "git checkout frontend\dist"
-
-    & git clean -fdq -- frontend/dist
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "git clean frontend\dist failed (exit code $LASTEXITCODE)."
+    $FrontendDist = Join-Path $FrontendDir 'dist'
+    if (Test-Path -LiteralPath $FrontendDist) {
+        Remove-Item -LiteralPath $FrontendDist -Recurse -Force
     }
     Write-Ok "Local build output cleared"
 
