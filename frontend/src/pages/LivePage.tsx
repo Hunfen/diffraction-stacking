@@ -33,6 +33,7 @@ import {
   LinkOutlined,
 } from '@ant-design/icons';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import dayjs from 'dayjs';
 import { useAcquisition } from '../api/acquisition';
 import { apiGet, apiPost, apiPut } from '../api/client';
 import { resolveUrl } from '../api/backend';
@@ -861,6 +862,15 @@ export default function LivePage() {
     }
   };
 
+  // 预期快照保存路径（仅界面提示）：<folder>/[<prefix>_]YYYYMMDDTHH-MM-SS.<ext>，与后端 now_stamp 口径一致。
+  const expectedSnapshotPath = useMemo(() => {
+    const folder =
+      snapshotFolder && snapshotFolder.trim() !== '' ? snapshotFolder : 'data_root/snapshots';
+    const ts = dayjs().format('YYYYMMDD[T]HH-mm-ss');
+    const name = snapshotPrefix ? `${snapshotPrefix}_${ts}.${snapshotFormat}` : `${ts}.${snapshotFormat}`;
+    return `${folder}/${name}`;
+  }, [snapshotFolder, snapshotPrefix, snapshotFormat]);
+
   // ------------------------------------------------------------------ ROI 拖选
   const startCanvasDrag = useCallback((e: ReactMouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -1119,34 +1129,28 @@ export default function LivePage() {
             <Card size="small" title="Snapshot (Single Frame)">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <div>
-                  <Button
-                    icon={<FolderOpenOutlined />}
-                    loading={folderPicking}
-                    onClick={() => void pickSnapshotFolder()}
-                  >
-                    Choose Folder…
-                  </Button>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Button
+                      icon={<FolderOpenOutlined />}
+                      loading={folderPicking}
+                      onClick={() => void pickSnapshotFolder()}
+                    >
+                      Choose Folder…
+                    </Button>
+                    <Input
+                      value={snapshotPrefix}
+                      onChange={(e) => setSnapshotPrefix(e.target.value)}
+                      onBlur={() => localStorage.setItem(SNAPSHOT_PREFIX_KEY, snapshotPrefix)}
+                      onPressEnter={(e) => e.currentTarget.blur()}
+                      placeholder="Prefix (optional)"
+                      allowClear
+                      maxLength={128}
+                      style={{ flex: 1, minWidth: 0 }}
+                    />
+                  </div>
                   <div style={{ marginTop: 4 }}>
                     <Typography.Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                      {snapshotFolder === null
-                        ? 'Loading default folder…'
-                        : snapshotFolder || 'Default folder (data_root/snapshots)'}
-                    </Typography.Text>
-                  </div>
-                </div>
-                <div>
-                  <Input
-                    value={snapshotPrefix}
-                    onChange={(e) => setSnapshotPrefix(e.target.value)}
-                    onBlur={() => localStorage.setItem(SNAPSHOT_PREFIX_KEY, snapshotPrefix)}
-                    onPressEnter={(e) => e.currentTarget.blur()}
-                    placeholder="Prefix (optional)"
-                    allowClear
-                    maxLength={128}
-                  />
-                  <div style={{ marginTop: 4 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      File name format: &lt;prefix&gt;_&lt;timestamp&gt;.ext (or &lt;timestamp&gt;.ext without a prefix)
+                      Will save to: {expectedSnapshotPath}
                     </Typography.Text>
                   </div>
                 </div>

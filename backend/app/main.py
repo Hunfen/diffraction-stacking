@@ -38,6 +38,22 @@ from .util import (CONTENT_TYPES, REPO_ROOT, auto_contrast_8bit, ensure_dirs,
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 INDEX_HTML = DIST_DIR / "index.html"
 
+# index.html must always be fetched fresh: the frontend assets are rebuilt on
+# every release, and a browser that keeps the cached page would keep loading
+# the old UI after the program is restarted. Hashed assets may keep normal
+# caching.
+NO_CACHE_HEADERS = {"Cache-Control": "no-store"}
+
+
+class NoCacheIndexStaticFiles(StaticFiles):
+    """Static mount variant that adds no-store to index.html responses."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if path in ("", "index.html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
 
 # =========================================================================
 # 原生文件夹选择对话框（服务器本机）
@@ -1047,7 +1063,7 @@ async def ws_events(websocket: WebSocket):
 @app.get("/")
 def root():
     if INDEX_HTML.is_file():
-        return FileResponse(INDEX_HTML)
+        return FileResponse(INDEX_HTML, headers=NO_CACHE_HEADERS)
     return ok({
         "frontend_built": False,
         "message": ("Frontend is not built. Run `cd frontend && npm run build` "
@@ -1062,11 +1078,11 @@ async def spa_fallback(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404 and INDEX_HTML.is_file() \
             and not request.url.path.startswith("/api") \
             and not request.url.path.startswith("/ws"):
-        return FileResponse(INDEX_HTML)
+        return FileResponse(INDEX_HTML, headers=NO_CACHE_HEADERS)
     return JSONResponse(status_code=exc.status_code, content={
         "ok": False, "data": None, "error": str(exc.detail)})
 
 
 if DIST_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(DIST_DIR), html=True),
+    app.mount("/", NoCacheIndexStaticFiles(directory=str(DIST_DIR), html=True),
               name="static")
