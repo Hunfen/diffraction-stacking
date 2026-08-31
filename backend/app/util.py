@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -229,3 +230,124 @@ CONTENT_TYPES = {
     ".json": "application/json",
     ".txt": "text/plain; charset=utf-8",
 }
+
+
+# =========================================================================
+# FITS/TIFF 采集元数据（v1.6：全量相机参数 + 用户 comment）
+# =========================================================================
+
+# 扩展参数名 → FITS HIERARCH CAM 键（值来自 props dict；Mock 专属键仅在存在时写）。
+CAM_HIERARCH_KEYS = (
+    ("width", "WIDTH"),
+    ("height", "HEIGHT"),
+    ("offset_x", "OFFSETX"),
+    ("offset_y", "OFFSETY"),
+    ("reverse_x", "REVERSX"),
+    ("reverse_y", "REVERSY"),
+    ("trigger_mode", "TRIGGER"),
+    ("auto_exposure", "AUTOEXP"),
+    ("auto_gain", "AUTOGAIN"),
+    ("mock_pattern", "MOCKPAT"),
+    ("mock_scene", "MOCKSCE"),
+    ("mock_drift", "MOCKDRIFT"),
+)
+
+# TIFF 私有 tag：完整采集元数据 JSON（UTF-8 字节，含中文 comment）。
+TIFF_METADATA_TAG = 65000
+TIFF_SOFTWARE = "Static AstroPhoto"
+
+
+def _meta_float(value, default=0.0) -> float:
+    """把 props 里的数值安全转 float；非数值/非有限值（inf/nan）回退默认值，
+    避免一帧/整个文件写入因此失败。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return f if math.isfinite(f) else float(default)
+
+
+def capture_metadata(props: dict, cam_name: str, cam_serial: str,
+                     frametype: str, session: str, nframe: int,
+                     comment: str = "") -> dict:
+    """构建「采集元数据 dict」：FITS/TIFF 文件头的统一数据源。
+
+    - ``props``：camera.get_properties() 的全量 ``{name: value}`` 映射
+      （13 个契约属性 + Mock 的 mock_pattern/mock_scene/mock_drift）；
+    - 相机身份（name/serial）、frametype、session、nframe、comment 单独存放；
+    - ``comment`` 保留用户原始文本（可含中文）：FITS 头写入时经
+      ``ascii_fits_value()`` 转 printable ASCII，TIFF 私有 tag 65000 直接以
+      UTF-8 字节保存（二者都不丢原始输入，只是存储口径不同）。
+    """
+    return {
+        "camera": {"name": str(cam_name or "unknown"),
+                   "serial": str(cam_serial or "unknown")},
+        "frametype": str(frametype or ""),
+        "session": str(session or ""),
+        "nframe": int(nframe or 0),
+        "comment": str(comment or ""),
+        "props": {str(k): v for k, v in dict(props or {}).items()},
+    }
+
+
+def fits_header_entries(meta: dict, stats: dict | None = None,
+                        date_obs: str | None = None) -> list:
+    """生成 FITS 头键值对列表 ``list[(key, value)]``（可直接写入 astropy 头）。
+
+    - 契约 §3.2 的 8 字符键：DATE-OBS/EXPOSURE/GAIN/BLACKLEV/TEMP/FRAMETYP/
+      CAMERA/SERIAL/SESSION/NFRAME/MEAN/STD/SATPCT/BITPIX（数值取自
+      ``meta["props"]``，缺失时按 0.0/unknown 兜底）；
+    - 扩展参数写 HIERARCH 键：``HIERARCH CAM WIDTH`` 等（仅当 props 中存在
+      对应键时写入，Mock 专属键 MOCKPAT/MOCKSCE/MOCKDRIFT 亦如此）；
+    - 用户 comment：经 ``ascii_fits_value()`` 转 printable ASCII（FITS 头只收
+      ASCII），多行按 ``\\n`` 拆成多条 ``COMMENT``；空行跳过。
+    """
+    props = dict((meta or {}).get("props") or {})
+    camera = (meta or {}).get("camera") or {}
+    stats = stats or {}
+    entries: list = [
+        ("DATE-OBS", date_obs or datetime.now().isoformat(timespec="milliseconds")),
+        ("EXPOSURE", _meta_float(props.get("exposure"))),
+        ("GAIN", _meta_float(props.get("gain"))),
+        ("BLACKLEV", _meta_float(props.get("black_level"))),
+        ("TEMP", _meta_float(props.get("device_temperature"))),
+        ("FRAMETYP", str((meta or {}).get("frametype") or "").upper()),
+        ("CAMERA", ascii_fits_value(camera.get("name") or "unknown")),
+        ("SERIAL", ascii_fits_value(camera.get("serial") or "unknown")),
+        ("SESSION", ascii_fits_value(str((meta or {}).get("session") or ""))),
+        ("NFRAME", int((meta or {}).get("nframe") or 0)),
+        (FITS_HEADER_MEAN, _meta_float(stats.get("mean"))),
+        (FITS_HEADER_STD, _meta_float(stats.get("std"))),
+        (FITS_HEADER_SATPCT, _meta_float(stats.get("saturated_pct"))),
+        ("BITPIX", 16),
+    ]
+    for prop_key, hier_key in CAM_HIERARCH_KEYS:
+        if prop_key in props:
+            entries.append((f"HIERARCH CAM {hier_key}", props[prop_key]))
+    comment = str((meta or {}).get("comment") or "")
+    for line in comment.split("\n"):
+        if line.strip():
+            entries.append(("COMMENT", ascii_fits_value(line)))
+    return entries
+
+
+def tiff_metadata(meta: dict) -> tuple:
+    """生成 tifffile.imwrite 的元数据参数。
+
+    返回 ``(description, extratags, software)``：
+    - ``description``（tag 270 ImageDescription）：参数+身份的 ASCII JSON
+      （可机读；不含中文 comment —— 中文统一走 tag 65000 的 UTF-8 字节）；
+    - ``extratags``：私有 tag 65000 = 完整 meta JSON 的 UTF-8 字节
+      （含中文 comment；dtype 'B'，writeonce=False）；
+    - ``software``（tag 305）："Static AstroPhoto"。
+    """
+    camera = (meta or {}).get("camera") or {}
+    props = dict((meta or {}).get("props") or {})
+    description = json.dumps(
+        {"camera": camera, "props": props},
+        ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        meta or {}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+    extratags = [(TIFF_METADATA_TAG, "B", len(payload), payload, False)]
+    return description, extratags, TIFF_SOFTWARE

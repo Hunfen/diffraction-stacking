@@ -467,6 +467,7 @@ class SnapshotBody(BaseModel):
     format: str = "fits"
     folder: str | None = None
     prefix: str | None = None
+    comment: str | None = None
 
 
 class SettingsBody(BaseModel):
@@ -746,17 +747,22 @@ def snapshot(body: SnapshotBody):
         raise HTTPException(400, "format only supports fits|tiff|png")
     folder = _snapshot_folder(body.folder)
     prefix = sanitize_prefix(body.prefix)
+    comment = body.comment or ""
+    if len(comment) > 256:
+        raise HTTPException(400, "comment must be at most 256 characters")
     try:
         frame = camera_service.grab_frame()
         cam = camera_service.device
         cam_info = {"name": getattr(cam, "name", "unknown"),
                     "serial": getattr(cam, "serial", "unknown")}
+        # v1.6：全量相机参数写入快照文件头（FITS HIERARCH CAM / TIFF tag 65000）；
+        # 全量读取失败时退回空 dict，FITS 头按 0.0/unknown 兜底。
         props = {}
-        for key in ("exposure", "gain", "black_level", "device_temperature"):
-            try:
-                props[key] = camera_service.get_property(key)
-            except Exception:  # noqa: BLE001
-                props[key] = 0.0
+        try:
+            props = {p["name"]: p["value"]
+                     for p in camera_service.get_properties()}
+        except Exception:  # noqa: BLE001
+            props = {}
     except Exception as exc:  # noqa: BLE001
         raise_cam_err(exc)
     try:
@@ -764,7 +770,8 @@ def snapshot(body: SnapshotBody):
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HTTPException(400, f"Failed to create snapshot folder: {exc}")
-        return ok(save_snapshot(frame, fmt, cam_info, props, folder, prefix))
+        return ok(save_snapshot(frame, fmt, cam_info, props, folder, prefix,
+                                comment=comment))
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

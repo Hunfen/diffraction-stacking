@@ -665,6 +665,8 @@ export default function LivePage() {
   const [snapshotPrefix, setSnapshotPrefix] = useState<string>(
     () => localStorage.getItem(SNAPSHOT_PREFIX_KEY) ?? '',
   );
+  // 快照 comment（可选）：随 POST /api/snapshot 发送，后端写入文件头（FITS COMMENT / TIFF ImageDescription）
+  const [snapshotComment, setSnapshotComment] = useState('');
   // ROI 拖选状态
   const [dragging, setDragging] = useState(false);
   const [roiBusy, setRoiBusy] = useState(false);
@@ -842,6 +844,7 @@ export default function LivePage() {
         format: snapshotFormat,
         folder: snapshotFolder || '',
         prefix: snapshotPrefix,
+        comment: snapshotComment,
       });
       setSnapshot(result);
       // v1.4 返回 folder 为绝对路径、prefix 为 sanitize 后的值；两者都写入 localStorage
@@ -1144,6 +1147,20 @@ export default function LivePage() {
                   <div style={{ marginTop: 4 }}>
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                       File name format: &lt;prefix&gt;_&lt;timestamp&gt;.ext (or &lt;timestamp&gt;.ext without a prefix)
+                    </Typography.Text>
+                  </div>
+                </div>
+                <div>
+                  <Input
+                    value={snapshotComment}
+                    onChange={(e) => setSnapshotComment(e.target.value)}
+                    placeholder="Comment (optional, written into file header)"
+                    allowClear
+                    maxLength={256}
+                  />
+                  <div style={{ marginTop: 4 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      Written into the file header: FITS COMMENT cards / TIFF ImageDescription (UTF-8, Chinese supported)
                     </Typography.Text>
                   </div>
                 </div>

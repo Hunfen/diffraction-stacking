@@ -559,6 +559,89 @@ def step_live_snapshot():
         os.chmod(snap_dir, orig_mode)
 
 
+def step_metadata_headers():
+    """v1.6: FITS 全量参数(HIERARCH CAM)+COMMENT；TIFF tag 270/305/65000。"""
+    # --- FITS snapshot with a Chinese comment ---
+    status, snap = http_req("POST", "/api/snapshot",
+                            {"format": "fits", "comment": "中文注释 first\nsecond"})
+    check(status == 200 and snap.get("ok"),
+          "snapshot FITS with comment succeeds")
+    if snap.get("ok"):
+        fpath = DATA_ROOT / "snapshots" / snap["data"]["file"]
+        try:
+            from astropy.io import fits
+            with fits.open(fpath) as hdul:
+                hdr = hdul[0].header
+            hier_keys = ("HIERARCH CAM WIDTH", "HIERARCH CAM HEIGHT",
+                         "HIERARCH CAM OFFSETX", "HIERARCH CAM OFFSETY",
+                         "HIERARCH CAM REVERSX", "HIERARCH CAM REVERSY",
+                         "HIERARCH CAM TRIGGER", "HIERARCH CAM AUTOEXP",
+                         "HIERARCH CAM AUTOGAIN", "HIERARCH CAM MOCKPAT",
+                         "HIERARCH CAM MOCKSCE", "HIERARCH CAM MOCKDRIFT")
+            for k in hier_keys:
+                check(k in hdr, f"snapshot FITS header contains {k}")
+            comments = [c.value for c in hdr.cards if c.keyword == "COMMENT"]
+            check(len(comments) == 2,
+                  "FITS COMMENT has 2 cards (multiline comment split by \\n)")
+            check(all(isinstance(v, str) and v.isascii() and v.isprintable()
+                      for v in comments),
+                  "FITS COMMENT values are printable ASCII (Chinese transliterated)")
+            check(not any("中文" in v for v in comments),
+                  "FITS COMMENT contains no Chinese (ascii_fits_value)")
+            check(comments[0].endswith("first") and comments[1] == "second",
+                  "FITS COMMENT keeps the ASCII text of the user comment")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"FITS metadata header validation failed: {exc}")
+
+    # --- TIFF snapshot with a Chinese comment ---
+    status, snap_t = http_req("POST", "/api/snapshot",
+                              {"format": "tiff", "comment": "中文快照注释"})
+    check(status == 200 and snap_t.get("ok"),
+          "snapshot TIFF with comment succeeds")
+    if snap_t.get("ok"):
+        tpath = DATA_ROOT / "snapshots" / snap_t["data"]["file"]
+        try:
+            import tifffile
+            with tifffile.TiffFile(tpath) as tf:
+                page = tf.pages[0]
+                check(270 in page.tags, "TIFF has ImageDescription tag 270")
+                check(305 in page.tags, "TIFF has Software tag 305")
+                check(65000 in page.tags, "TIFF has private metadata tag 65000")
+                check(page.tags[305].value == "Static AstroPhoto",
+                      "TIFF Software == 'Static AstroPhoto'")
+                desc = page.tags[270].value
+                check(isinstance(desc, str) and desc.isascii(),
+                      "TIFF ImageDescription is ASCII JSON")
+                desc_meta = json.loads(desc)
+                check("props" in desc_meta and "camera" in desc_meta,
+                      "TIFF ImageDescription carries props + camera identity")
+                payload = page.tags[65000].value
+                meta = json.loads(payload.decode("utf-8"))
+                check(meta.get("comment") == "中文快照注释",
+                      "TIFF tag 65000 keeps Chinese comment (UTF-8 round trip)")
+                check(meta.get("frametype") == "SNAPSHOT"
+                      and meta.get("session") == "SNAPSHOT"
+                      and meta.get("nframe") == 1,
+                      "TIFF tag 65000 meta has frametype/session/nframe")
+                check(page.asarray().dtype == np.uint16,
+                      "TIFF image data is uint16 (16-bit)")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"TIFF metadata header validation failed: {exc}")
+
+    # --- comment longer than 256 chars is rejected with 400 ---
+    status, bad_c = http_req("POST", "/api/snapshot",
+                             {"format": "fits", "comment": "x" * 257},
+                             expect=400)
+    check(status == 400 and not bad_c.get("ok")
+          and (bad_c or {}).get("error")
+          == "comment must be at most 256 characters",
+          "snapshot comment > 256 chars -> 400")
+    status, ok_c = http_req("POST", "/api/snapshot",
+                            {"format": "fits", "comment": "x" * 256})
+    check(status == 200 and ok_c.get("ok"),
+          "snapshot comment of exactly 256 chars succeeds")
+
+
 def step_snapshot_folders():
     """v1.4: 绝对 folder + prefix + 文件名恒带时间戳；保留 v1.3 相对单段名与 folders 接口。"""
     snap_root = (DATA_ROOT / "snapshots").resolve()
@@ -1050,6 +1133,19 @@ def step_session_files():
                          "SESSION", "NFRAME")
         check(all(k in hdr for k in required_keys),
               "FITS header contains the 10 contract keywords")
+        # v1.6: full camera parameters as HIERARCH CAM keys (incl. mock-only).
+        hier_keys = ("HIERARCH CAM WIDTH", "HIERARCH CAM HEIGHT",
+                     "HIERARCH CAM OFFSETX", "HIERARCH CAM OFFSETY",
+                     "HIERARCH CAM REVERSX", "HIERARCH CAM REVERSY",
+                     "HIERARCH CAM TRIGGER", "HIERARCH CAM AUTOEXP",
+                     "HIERARCH CAM AUTOGAIN", "HIERARCH CAM MOCKPAT",
+                     "HIERARCH CAM MOCKSCE", "HIERARCH CAM MOCKDRIFT")
+        check(all(k in hdr for k in hier_keys),
+              "capture FITS header contains HIERARCH CAM keys (full parameters)")
+        # v1.6: phase note is written as FITS COMMENT.
+        comments = [c.value for c in hdr.cards if c.keyword == "COMMENT"]
+        check(any(v == "smoke bias" for v in comments),
+              "capture FITS COMMENT carries the phase note ('smoke bias')")
         check(hdr.get("BITPIX") == 16 and int(data.max()) <= 4095,
               "FITS is 16-bit with data in the low 12 bits (max <= 4095)")
         check("." in str(hdr.get("DATE-OBS", "")),
@@ -1316,6 +1412,7 @@ def main():
         step_chinese_session()
         step_dotted_session()
         step_live_snapshot()
+        step_metadata_headers()
         step_snapshot_folders()
         step_capture()
         step_capture_dir_error()

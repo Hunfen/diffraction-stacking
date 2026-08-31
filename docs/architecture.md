@@ -266,11 +266,30 @@ gain / black_level / 采集区域 / binning / 触发设置，只有曝光和物�
 
 **FITS 头部关键字**（借天文惯例）：
 
+基础键：
+
 ```
 DATE-OBS, EXPOSURE(µs), GAIN(dB), BLACKLEV, TEMP(°C),
 CAMERA=DMK 33GX249e, SERIAL, FRAMETYP {BIAS|DARK|FLAT|LIGHT|SNAPSHOT},
-SESSION, NFRAME, BITPIX=16(有效位12)
+SESSION, NFRAME, MEAN/STD/SATPCT(帧质量统计；快照=单帧实时计算), BITPIX=16(有效位12)
 ```
+
+扩展键（HIERARCH，相机支持时写入；序列拍摄每帧与快照 FITS 均含）：
+
+```
+HIERARCH CAM WIDTH / HEIGHT / OFFSETX / OFFSETY / REVERSX / REVERSY /
+             TRIGGER / AUTOEXP / AUTOGAIN
+HIERARCH CAM MOCKPAT / MOCKSCE / MOCKDRIFT   # Mock 专属，仅存在时写入
+```
+
+用户 comment：序列拍摄的相位 `note` 或快照请求的 `comment` 写为 `COMMENT` 卡片，
+值经 ASCII 转写（中文等非 ASCII 字符替换为 `_`，保证 FITS 头 ASCII 合规），
+多行按 `\n` 拆成多条 `COMMENT`（全空白行跳过）。
+
+**TIFF 快照元数据**：快照 TIFF 由 `tifffile` 写入（不再用 PIL），数据为 uint16
+原帧；含 ImageDescription(270，参数+身份的 ASCII JSON)、Software(305=
+`Static AstroPhoto`)、私有 tag 65000（完整元数据 JSON 的 UTF-8 字节，
+含中文 comment 原文）。
 
 ### 5.4 数据处理服务 ProcessService
 

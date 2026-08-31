@@ -11,19 +11,18 @@ import json
 import threading
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import tifffile
 from astropy.io import fits
 from PIL import Image
 
 from .camera import CameraService
-from .util import (FITS_HEADER_MEAN, FITS_HEADER_STD,
-                   FITS_HEADER_SATPCT, ascii_fits_value, auto_contrast_8bit,
+from .util import (auto_contrast_8bit, capture_metadata, fits_header_entries,
                    frame_stats, get_captures_dir, get_data_root,
                    get_snapshots_dir, now_iso, now_stamp,
-                   sanitize_session_name)
+                   sanitize_session_name, tiff_metadata)
 
 PHASE_TYPES = ("bias", "dark", "flat", "light")
 ACTIVE_STATUSES = {"running", "waiting_user", "capturing"}
@@ -36,6 +35,20 @@ PROMPTS = {
 }
 
 MAX_CONSECUTIVE_FAILURES = 5
+
+
+def _apply_fits_entries(header, entries: list) -> None:
+    """把 ``fits_header_entries`` 的键值对写入 astropy Header。
+
+    COMMENT 键用 ``add_comment`` 追加（多条不互相覆盖；FITS 头只收 printable
+    ASCII，值在 util 侧已用 ascii_fits_value 处理），其余键直接赋值
+    （``HIERARCH CAM WIDTH`` 等由 astropy 解析为 HIERARCH card）。
+    """
+    for key, value in entries:
+        if key == "COMMENT":
+            header.add_comment(str(value))
+        else:
+            header[key] = value
 
 
 def _empty_state() -> dict:
@@ -339,9 +352,19 @@ class CaptureService:
                 # 用默认值写入 FITS 头，不把整帧判为失败。
                 temp = self._optional_property("device_temperature", 0.0)
                 cam = self.camera.device
+                # v1.6：每帧取全量相机参数写入 FITS 头（HIERARCH CAM ...）；
+                # 全量读取失败时退回空 dict，由 _save_fits 用逐帧值兜底。
+                props = {}
+                try:
+                    props = {p["name"]: p["value"]
+                             for p in self.camera.get_properties()}
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"Failed to read full camera properties: {exc}")
                 try:
                     self._save_fits(group_dir / f"{name}.fits", frame, stats,
-                                    ptype, exposure, gain, black, temp, cam, n)
+                                    ptype, exposure, gain, black, temp, cam, n,
+                                    props=props,
+                                    comment=phase.get("note") or "")
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(f"Failed to write FITS: {exc}") from exc
                 consecutive_failures = 0
@@ -390,25 +413,32 @@ class CaptureService:
 
     # ------------------------------------------------------------ 落盘
     def _save_fits(self, path: Path, frame: np.ndarray, stats: dict,
-                   frametype: str, exposure, gain, black, temp, cam, nframe) -> None:
+                   frametype: str, exposure, gain, black, temp, cam, nframe,
+                   props: dict | None = None, comment: str = "") -> None:
+        """写一帧 FITS：契约 §3.2 键 + HIERARCH CAM 全量参数 + COMMENT。
+
+        ``props`` 为 ``camera.get_properties()`` 的全量映射；缺失的 4 个契约
+        数值键（exposure/gain/black_level/device_temperature）用逐帧读取值
+        兜底（保留旧口径，兼容/日志用途）。``comment`` 为当前相位 note
+        （用户 comment，可含中文；FITS 侧经 ascii_fits_value 转 ASCII）。
+        """
         hdu = fits.PrimaryHDU(np.asarray(frame, dtype=np.uint16))
         header = hdu.header
-        header["DATE-OBS"] = datetime.now().isoformat(timespec="milliseconds")
-        header["EXPOSURE"] = float(exposure)
-        header["GAIN"] = float(gain)
-        header["BLACKLEV"] = float(black)
-        header["TEMP"] = float(temp)
-        header["FRAMETYP"] = frametype.upper()
-        header["CAMERA"] = str(getattr(cam, "name", "unknown"))
-        header["SERIAL"] = str(getattr(cam, "serial", "unknown"))
-        # FITS 头只接受 printable ASCII：transliterate/替换非 ASCII，
-        # 目录名、meta.json、URL、sessions 列表仍保留原始 effective 中文名。
-        header["SESSION"] = ascii_fits_value(str(self._session_id or ""))
-        header["NFRAME"] = int(nframe)
-        header[FITS_HEADER_MEAN] = float(stats["mean"])
-        header[FITS_HEADER_STD] = float(stats["std"])
-        header[FITS_HEADER_SATPCT] = float(stats["saturated_pct"])
-        header["BITPIX"] = 16  # astropy 默认，显式声明：数据有效位 12
+        props = dict(props or {})
+        props.setdefault("exposure", float(exposure))
+        props.setdefault("gain", float(gain))
+        props.setdefault("black_level", float(black))
+        props.setdefault("device_temperature", float(temp))
+        meta = capture_metadata(
+            props,
+            str(getattr(cam, "name", "unknown")),
+            str(getattr(cam, "serial", "unknown")),
+            frametype.upper(),
+            str(self._session_id or ""),
+            int(nframe),
+            comment or "",
+        )
+        _apply_fits_entries(header, fits_header_entries(meta, stats))
         hdu.writeto(path, overwrite=True)
 
     def _write_meta(self, session_dir: Path, session_id: str,
@@ -435,8 +465,13 @@ class CaptureService:
 
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
                   props: dict | None = None, folder: str | Path = "",
-                  prefix: str = "") -> dict:
+                  prefix: str = "", comment: str = "") -> dict:
     """v1.4：单帧快照，文件名恒带时间戳。
+
+    v1.6：FITS 头写全量相机参数（HIERARCH CAM ...）+ 用户 comment
+    （COMMENT，经 ascii_fits_value 转 printable ASCII）；TIFF 改用 tifffile
+    写 ImageDescription(270)/Software(305) + 私有 tag 65000（完整 meta JSON
+    的 UTF-8 字节，含中文 comment）。
 
     folder 为已解析的绝对目录（调用方保证位于 data_root 内）；
     prefix 已按 v1.4 口径 sanitize。文件名：
@@ -451,26 +486,23 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
     prefix = prefix or ""
     cam = cam or {}
     props = props or {}
+    meta = capture_metadata(props, cam.get("name", "unknown"),
+                            cam.get("serial", "unknown"), "SNAPSHOT",
+                            "SNAPSHOT", 1, comment or "")
     if fmt == "fits":
         ext = "fits"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
         hdu = fits.PrimaryHDU(np.asarray(frame, dtype=np.uint16))
-        hdu.header["DATE-OBS"] = datetime.now().isoformat(timespec="milliseconds")
-        hdu.header["EXPOSURE"] = float(props.get("exposure", 0.0))
-        hdu.header["GAIN"] = float(props.get("gain", 0.0))
-        hdu.header["BLACKLEV"] = float(props.get("black_level", 0.0))
-        hdu.header["TEMP"] = float(props.get("device_temperature", 0.0))
-        hdu.header["FRAMETYP"] = "SNAPSHOT"
-        hdu.header["CAMERA"] = str(cam.get("name", "unknown"))
-        hdu.header["SERIAL"] = str(cam.get("serial", "unknown"))
-        hdu.header["SESSION"] = "SNAPSHOT"
-        hdu.header["NFRAME"] = 1
+        _apply_fits_entries(hdu.header,
+                            fits_header_entries(meta, frame_stats(frame)))
         hdu.writeto(snap_dir / name, overwrite=True)
     elif fmt == "tiff":
         ext = "tiff"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
-        Image.fromarray(np.asarray(frame, dtype=np.uint16), mode="I;16").save(
-            snap_dir / name)
+        description, extratags, software = tiff_metadata(meta)
+        tifffile.imwrite(snap_dir / name, np.asarray(frame, dtype=np.uint16),
+                         description=description, extratags=extratags,
+                         software=software)
     elif fmt == "png":
         ext = "png"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"

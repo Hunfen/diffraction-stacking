@@ -227,7 +227,7 @@ query：`?path=<绝对路径，可空>`
 - 仅列出**直接子目录**（按名称排序，不列文件）；`files` 恒为 `[]`（契约占位字段）
 - `parent`：上一级绝对路径；当前目录为 `data_root` 顶层时 `parent:null`
 
-**POST /api/snapshot** — body `{ "format": "fits", "folder": "/abs/path/to/dir", "prefix": "spot" }`
+**POST /api/snapshot** — body `{ "format": "fits", "folder": "/abs/path/to/dir", "prefix": "spot", "comment": "Si(111) 1x1, 60 eV" }`
 
 - `format` ∈ `fits`|`tiff`|`png`（缺省 `fits`）
 - `folder`（v1.4）：可选。
@@ -239,6 +239,12 @@ query：`?path=<绝对路径，可空>`
     仍禁止 `..`/`.` 段、路径分隔符 `/` `\` 与 Windows 非法字符 `< > : " | ? *`（400 英文错误）
 - `prefix`（v1.4）：可选。sanitize 口径：路径分隔符与 `< > : " | ? *` 及空白统一替换为
   `_`，允许为空；非 ASCII 字符（如中文）保留
+- `comment`（可选）：用户备注，写入文件头。接受任意 UTF-8 文本（含中文），
+  前后端均限制 ≤256 字符（超长后端返回 400）；缺省/空 = 不写入
+  - FITS：写为 `COMMENT` 卡片（值经 ASCII 转写，多行按 `\n` 拆成多条，见 §3.2）
+  - TIFF：完整原文（UTF-8）写入私有 tag 65000，并进入 ImageDescription(270) 的
+    ASCII JSON（见 §3.2）
+  - PNG：无头部元数据，忽略
 - **文件名恒带时间戳**（v1.4）：
   - 有 prefix → `<prefix>_<YYYYMMDDTHH-MM-SS>.<ext>`
   - 无 prefix → `<YYYYMMDDTHH-MM-SS>.<ext>`
@@ -257,7 +263,10 @@ query：`?path=<绝对路径，可空>`
   `/api/files/snapshots/<rel-to-snapshots>/<file>`（根目录无中间段）；
   其余 data_root 内目录使用 `/api/files/snapshots/<rel-to-data_root>/<file>`
 - 快照 16-bit（FITS/TIFF 保留原始 uint16，PNG 为自动对比度 8-bit）
-- 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`）
+- 快照 FITS 头同 §3.2 必填关键字（`SESSION=SNAPSHOT`、`NFRAME=1`），并写入
+  全量相机参数（`HIERARCH CAM …`）与用户 `COMMENT`（见 §3.2）
+- 快照 TIFF 由 tifffile 写入：ImageDescription(270) + Software(305) +
+  私有 tag 65000（UTF-8 完整元数据 JSON，含中文 comment 原文，见 §3.2）
 - 未打开设备返回 409
 
 **GET /api/snapshot/folders**（v1.3 兼容保留；v1.4 前端新流程不再使用，旧调用继续可用）
@@ -300,6 +309,8 @@ query：`?path=<绝对路径，可空>`
   均使用 effective，不再使用原始输入）
 - `exposure_us: null` = 沿用当前相机曝光；非 null = 该相位强制覆盖（拍摄时设置、相位结束不恢复）
 - `type` ∈ `bias|dark|flat|light`；`count` 1–10000；`phases` 不能为空（空数组返回 400）
+- 相位 `note` 写入该相位每帧 FITS 头的 `COMMENT`（值经 ASCII 转写，多行按 `\n`
+  拆分，见 §3.2）
 
 ```json
 { "ok": true, "data": {
@@ -522,14 +533,52 @@ HTTP 状态为 **501**。
 
 ### 3.2 FITS 头（每帧必填）
 
+基础关键字：
+
 ```
 DATE-OBS   ISO 8601 毫秒      EXPOSURE   曝光 µs
 GAIN       dB                 BLACKLEV   黑电平 ADU
 TEMP       传感器温度 °C        FRAMETYP   BIAS|DARK|FLAT|LIGHT|SNAPSHOT
 CAMERA     'DMK 33GX249e'     SERIAL     序列号
 SESSION    effective session 名（v1.2）    NFRAME     帧序号
+MEAN/STD/SATPCT   帧质量统计（快照=单帧实时计算；序列拍摄=每帧统计写入）
 BITPIX=16（有效位 12）
 ```
+
+全量相机参数（HIERARCH 扩展键；`camera.get_properties()` 支持时写入，
+序列拍摄每帧与快照 FITS 均包含）：
+
+```
+HIERARCH CAM WIDTH      采集宽度 px      HIERARCH CAM HEIGHT     采集高度 px
+HIERARCH CAM OFFSETX    采集偏移 X px    HIERARCH CAM OFFSETY    采集偏移 Y px
+HIERARCH CAM REVERSX    Reverse X        HIERARCH CAM REVERSY    Reverse Y
+HIERARCH CAM TRIGGER    Trigger Mode     HIERARCH CAM AUTOEXP    Auto Exposure
+HIERARCH CAM AUTOGAIN   Auto Gain
+HIERARCH CAM MOCKPAT / MOCKSCE / MOCKDRIFT   # Mock 专属，仅存在时写入
+```
+
+- 13 个契约属性（exposure/gain/black_level/device_temperature 用上面的基础键，
+  width/height/offset_x/offset_y/reverse_x/reverse_y/trigger_mode/
+  auto_exposure/auto_gain 用 HIERARCH CAM 键）；Mock 的 mock_pattern/
+  mock_scene/mock_drift 以 `HIERARCH CAM MOCKPAT/MOCKSCE/MOCKDRIFT` 写入
+
+用户 comment：
+
+- 来源：序列拍摄 = 相位 `note`；快照 = 请求体 `comment`
+- 写为 `COMMENT` 卡片；值经 `ascii_fits_value()` 转写为 printable ASCII
+  （非 ASCII 字符如中文替换为 `_`，保证 FITS 头 ASCII 合规）；多行按 `\n`
+  拆成多条 `COMMENT`（全空白行跳过，不生成空 COMMENT 卡）
+- 中文原文不写入 FITS 头；完整保留于 TIFF 快照的私有 tag 65000（UTF-8，见下）
+
+**TIFF 快照元数据**（仅快照；由 tifffile 写入，不再用 PIL）：
+
+| Tag | 编号 | 内容 |
+|---|---|---|
+| ImageDescription | 270 | 参数 + 相机身份的 ASCII JSON（机器可读，非 ASCII 以 `\uXXXX` 转义） |
+| Software | 305 | `Static AstroPhoto` |
+| 私有 tag | 65000 | 完整元数据 JSON 的 UTF-8 字节（含中文 comment 原文；dtype `'B'`，writeonce=False） |
+
+数据本身仍为 uint16 原帧（有效位 12），与 FITS 口径一致。
 
 ### 3.3 处理公式（实现口径统一）
 
