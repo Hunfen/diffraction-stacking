@@ -10,8 +10,8 @@ interface Options {
 }
 
 /**
- * 自动重连 WebSocket（指数退避：1s → 2s → 4s → … 上限 30s，带抖动）。
- * path 变化或 enabled 变化都会重建连接；卸载时清理。
+ * Auto-reconnecting WebSocket (exponential backoff: 1s -> 2s -> 4s -> ... capped at 30s, with jitter).
+ * A change of path or enabled rebuilds the connection; unmounting cleans it up.
  */
 export function useReconnectingWebSocket(path: string, options: Options): WsStatus {
   const { enabled, onMessage, onStatusChange } = options;
@@ -19,7 +19,7 @@ export function useReconnectingWebSocket(path: string, options: Options): WsStat
   const onMessageRef = useRef(onMessage);
   const onStatusRef = useRef(onStatusChange);
 
-  // ref 只在 effect 中同步，不在渲染期写
+  // The ref is synced in effects only, never written during render
   useEffect(() => {
     onMessageRef.current = onMessage;
     onStatusRef.current = onStatusChange;
@@ -59,7 +59,7 @@ export function useReconnectingWebSocket(path: string, options: Options): WsStat
         return;
       }
 
-      ws.binaryType = 'blob'; // /ws/live 的 JPEG 帧以 Blob 到达，与文本消息区分
+      ws.binaryType = 'blob'; // /ws/live JPEG frames arrive as Blobs, distinct from text messages
 
       ws.onopen = () => {
         attempt = 0;
@@ -75,7 +75,7 @@ export function useReconnectingWebSocket(path: string, options: Options): WsStat
       };
 
       ws.onerror = () => {
-        // onclose 会随后触发，统一走重连逻辑
+        // onclose fires afterwards and goes through the shared reconnect path
         try {
           ws?.close();
         } catch {
@@ -93,7 +93,7 @@ export function useReconnectingWebSocket(path: string, options: Options): WsStat
       retryTimer = setTimeout(connect, delay);
     };
 
-    // 首次连接放到下一个宏任务，避免 effect 内同步 setState 造成级联渲染
+    // Defer the first connect to the next macrotask so a synchronous setState inside the effect cannot cascade renders
     connectTimer = setTimeout(connect, 0);
 
     return () => {
@@ -108,6 +108,6 @@ export function useReconnectingWebSocket(path: string, options: Options): WsStat
     };
   }, [path, enabled]);
 
-  // enabled=false 时不写 state，直接派生出 idle
+  // When enabled=false, skip the state write and derive idle directly
   return enabled ? status : 'idle';
 }

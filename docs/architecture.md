@@ -286,6 +286,16 @@ HIERARCH CAM MOCKPAT / MOCKSCE / MOCKDRIFT   # Mock 专属，仅存在时写入
 值经 ASCII 转写（中文等非 ASCII 字符替换为 `_`，保证 FITS 头 ASCII 合规），
 多行按 `\n` 拆成多条 `COMMENT`（全空白行跳过）。
 
+**存储方向约定（ORIENT）**：FITS 的行序惯例是自下而上（bottom-up），而本项目内存中的
+数组始终是传感器序（`row 0` = 传感器顶部）。因此写盘时统一在 I/O 边界做一次垂直翻转
+（`np.flipud`）并写入 `ORIENT='FITS-BOTTOM-UP'`；读取时仅当该键等于此值才翻回，
+无该键（旧文件）或值不同时按原样返回。这样 DS9 / GIMP / astropy 打开的方向与实时预览一致，
+而内部处理链、JPEG 预览、快照 TIFF/PNG 与 `STACK_preview.png` 的方向完全不变。
+所有 FITS **数据**读写都经过 `backend/app/fits_io.py`（`write_fits` / `read_fits` / `read_fits_data`），
+`capture.py` 与 `process.py` 不再直接调用 astropy。`sessions.py` 只读统计头
+（`MEAN` / `STD` / `SATPCT`）而不读像素数据，属该约定的豁免，仍直连 astropy；
+历史数据不迁移。
+
 **TIFF 快照元数据**：快照 TIFF 由 `tifffile` 写入（不再用 PIL），数据为 uint16
 原帧；含 ImageDescription(270，参数+身份的 ASCII JSON)、Software(305=
 `Static AstroPhoto`)、私有 tag 65000（完整元数据 JSON 的 UTF-8 字节，

@@ -16,7 +16,7 @@ import { LockOutlined, ReloadOutlined, SlidersOutlined } from '@ant-design/icons
 import { apiGet, apiPut } from '../api/client';
 import type { CameraProperty, PropertiesData, PropertySetResult } from '../api/types';
 
-/** Parameters 页控件的写入函数：PUT /api/properties/{name}，返回 { name, value, actual }。 */
+/** Write function for Parameters page controls: PUT /api/properties/{name}, returning { name, value, actual }. */
 type PutFn = (
   name: string,
   value: number | boolean | string,
@@ -31,7 +31,7 @@ const VISIBILITY_OPTIONS: { value: VisibilityLevel; label: string }[] = [
   { value: 'Guru', label: 'Guru' },
 ];
 
-// ------------------------------------------------------------------ 工具函数
+// ------------------------------------------------------------------ helpers
 
 function httpStatus(err: unknown): number | undefined {
   const response = (err as { response?: { status?: number } }).response;
@@ -47,12 +47,12 @@ function httpErrorMessage(err: unknown): string {
   return 'Unknown error';
 }
 
-/** 统一禁用判定：readonly / locked / available=false 均禁用（string 另按 readonly 只读展示）。 */
+/** Shared disable rule: readonly / locked / available=false all disable (string is shown read-only per readonly). */
 function controlDisabled(prop: CameraProperty): boolean {
   return Boolean(prop.readonly) || prop.locked === true || prop.available === false;
 }
 
-/** INVISIBLE（大小写不敏感，兼容 hidden）默认隐藏。 */
+/** INVISIBLE (case-insensitive, hidden accepted too) is hidden by default. */
 function isInvisible(prop: CameraProperty): boolean {
   const v = (prop.visibility ?? '').trim().toLowerCase();
   return v === 'invisible' || v === 'hidden';
@@ -74,7 +74,7 @@ function toNumber(v: CameraProperty['value']): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** 由 step 推导 float 展示精度（处理科学计数法，如 1e-9 → 9 位小数）。 */
+/** Derive the displayed float precision from step (handles scientific notation, e.g. 1e-9 -> 9 decimals). */
 function decimalsOf(step: number | undefined): number {
   if (step === undefined || !Number.isFinite(step) || step <= 0) return 0;
   const [mantissa, expStr] = step.toExponential().split('e');
@@ -83,7 +83,7 @@ function decimalsOf(step: number | undefined): number {
   return Math.max(0, frac - exp);
 }
 
-/** 行内摘要：数值型显示范围/单位/步进，enum 显示 options，其余显示类型。 */
+/** Row summary: numeric rows show range/unit/step, enum rows show options, the rest show the type. */
 function propSummary(prop: CameraProperty): string {
   const parts: string[] = [];
   if (prop.type === 'int' || prop.type === 'float') {
@@ -111,12 +111,12 @@ function visibilityTag(visibility?: string) {
   return <Tag color={color}>{visibility}</Tag>;
 }
 
-/** 行 key：command 用 name（保留执行成功/失败状态），其余按 name:value 以便 actual 回写后重挂载同步。 */
+/** Row key: name for commands (keeps the success/failure state), name:value otherwise so an actual write-back remounts in sync. */
 function rowKey(p: CameraProperty): string {
   return p.type === 'command' ? p.name : `${p.name}:${String(p.value)}`;
 }
 
-// ------------------------------------------------------------------ 类型化控件
+// ------------------------------------------------------------------ typed controls
 
 function NumericControl({ prop, onPut }: { prop: CameraProperty; onPut: PutFn }) {
   const [value, setValue] = useState<number | null>(() => toNumber(prop.value));
@@ -134,7 +134,7 @@ function NumericControl({ prop, onPut }: { prop: CameraProperty; onPut: PutFn })
       try {
         await onPut(prop.name, v);
       } catch {
-        // 写入失败（api client 已弹错）：回退到后端当前值
+        // Write failed (the api client already showed the error): revert to the backend's current value
         setValue(toNumber(prop.value));
       }
     },
@@ -343,13 +343,13 @@ function PropertyRow({ prop, onPut }: { prop: CameraProperty; onPut: PutFn }) {
   );
 }
 
-// ------------------------------------------------------------------ 页面
+// ------------------------------------------------------------------ page
 
 export default function ParametersPage() {
   const [properties, setProperties] = useState<CameraProperty[]>([]);
   const [loading, setLoading] = useState(true);
-  // deviceOpen：仅收到 409（明确未打开设备）时为 false；成功拉取时为 true；
-  // 其它错误（500/网络）保持 null，避免误报成“未打开设备”。
+  // deviceOpen: false only after a 409 (device explicitly not open); true after a successful fetch;
+  // other errors (500/network) stay null so an open device is not misreported as closed.
   const [deviceOpen, setDeviceOpen] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -377,7 +377,7 @@ export default function ParametersPage() {
     }
   }, []);
 
-  // 初始加载内联成 promise 链（loading 初值即 true），不在 effect 里同步调用会 setState 的刷新函数
+  // Initial load is an inline promise chain (loading starts true) so the effect never calls a refresh that setStates synchronously
   useEffect(() => {
     let cancelled = false;
     apiGet<PropertiesData>('/api/properties/all', { silent: true })
@@ -424,7 +424,7 @@ export default function ParametersPage() {
     const q = search.trim().toLowerCase();
     return properties.filter((p) => {
       const inv = isInvisible(p);
-      if (inv) return showHidden; // INVISIBLE：仅当 Show hidden 开启时显示
+      if (inv) return showHidden; // INVISIBLE: shown only while Show hidden is on
       if (visibility !== 'all' && normVisibility(p).toLowerCase() !== visibility.toLowerCase()) {
         return false;
       }

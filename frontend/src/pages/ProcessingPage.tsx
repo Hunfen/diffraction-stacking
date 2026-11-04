@@ -68,10 +68,10 @@ const JOB_STATUS_META: Record<JobEventData['status'], { color: string; text: str
   error: { color: 'error', text: 'Failed' },
 };
 
-/** 只轮询合法 job_id，避免 undefined 之类的幽灵 id 打 GET /api/process/jobs/undefined */
+/** Poll only valid job_ids so a ghost id such as undefined never hits GET /api/process/jobs/undefined */
 const isValidJobId = (id: string): boolean => typeof id === 'string' && id.length > 0 && id !== 'undefined';
 
-/** POST /api/process/* 响应是 {job_id,...}，统一归一成 jobs 表使用的 JobEventData（字段名 id） */
+/** POST /api/process/* responds with {job_id,...}; normalize it into the JobEventData (field id) used by the jobs map */
 const toJobEvent = (submitted: JobSubmitResult, sessionId?: string): JobEventData => ({
   id: submitted.job_id,
   type: submitted.type,
@@ -106,12 +106,12 @@ export default function ProcessingPage() {
   const [stretchSubmitting, setStretchSubmitting] = useState(false);
   const [previewVersion, setPreviewVersion] = useState(0);
 
-  // Bug B 修复：轮询闭包一律通过 ref 读取最新值，轮询 effect 的依赖保持稳定，
-  // 不再依赖 activeJobIds / selectedId 等会抖动的派生值。
+  // Bug B fix: polling closures read the latest values from refs so the polling effect keeps stable deps
+  // and no longer depends on jittery derived values such as activeJobIds / selectedId.
   const selectedIdRef = useRef<string | undefined>(selectedId);
   const activeJobIdsRef = useRef<string[]>([]);
-  // Bug A 修复：对 terminal job 事件按 `job.id|status` 去重，WS 与 1s 轮询重复送达时
-  // 只 reload 详情 / 自增预览版本一次，防止 previewVersion 被反复累加。
+  // Bug A fix: dedupe terminal job events by `job.id|status`, so a duplicate from WS and the 1s poll
+  // reloads the detail / bumps the preview version only once and previewVersion is not incremented repeatedly.
   const processedTerminalEventsRef = useRef(new Set<string>());
 
   const loadSessions = useCallback(async () => {
@@ -129,7 +129,7 @@ export default function ProcessingPage() {
     }
   }, []);
 
-  // 初始加载内联成 promise 链（loading 初值即 true），不在 effect 里同步调用会 setState 的刷新函数
+  // Initial load is an inline promise chain (loading starts true) so the effect never calls a refresh that setStates synchronously
   useEffect(() => {
     let cancelled = false;
     apiGet<SessionSummary[]>('/api/sessions')
@@ -157,7 +157,7 @@ export default function ProcessingPage() {
     setDetailLoading(true);
     try {
       const data = await apiGet<SessionDetail>(`/api/sessions/${id}`);
-      // 防止慢响应在用户切换会话后到达，把旧会话的 detail/exclusion 场景带回来。
+      // Keep a slow response from landing after a session switch and restoring the old session's detail/exclusion state.
       if (selectedIdRef.current !== id) return;
       setDetail(data);
       setSelectedResult((prev) =>
@@ -172,8 +172,8 @@ export default function ProcessingPage() {
     }
   }, []);
 
-  // selectedId 变化时内联加载详情；排除集合在 Select onChange 中同步清空，
-  // 初始加载时 excluded 本来就是空 Set，无需在 effect 内 setState。
+  // Load the detail inline when selectedId changes; the exclusion set is cleared in the Select onChange,
+  // and excluded already starts as an empty Set, so the effect needs no setState.
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
@@ -198,7 +198,7 @@ export default function ProcessingPage() {
     };
   }, [selectedId]);
 
-  // ref 与 state 同步：轮询回调始终读到最新的 selectedId / activeJobIds
+  // Keep refs in sync with state so polling callbacks always read the latest selectedId / activeJobIds
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
@@ -211,8 +211,8 @@ export default function ProcessingPage() {
   }, [jobs]);
 
   /**
-   * WS /ws/events 与 1s 轮询共用同一个更新入口，保证两种来源合并进同一个 setJobs。
-   * 只依赖稳定的 loadDetail，闭包内全部读 ref，不随 selectedId/jobs 变化重建。
+   * WS /ws/events and the 1s poll share one update entry point, so both sources merge into the same setJobs.
+   * It depends only on the stable loadDetail, reads everything else from refs and is not rebuilt as selectedId/jobs change.
    */
   const handleJobUpdate = useCallback(
     (job: JobEventData) => {
@@ -225,12 +225,12 @@ export default function ProcessingPage() {
       processedTerminalEventsRef.current.add(terminalKey);
 
       const selected = selectedIdRef.current;
-      // job 负载带 session_id 时，只刷新/自增当前选中会话的 UI，避免跨会话误触发。
+      // When a job payload carries session_id, only the selected session's UI is refreshed/bumped to avoid cross-session triggers.
       if (job.session_id && job.session_id !== selected) return;
       if (selected) {
         const reload = loadDetail(selected);
         if (job.type === 'stretch' && job.status === 'done') {
-          // 完成后先重新加载详情，拿到最新结果列表后再自增 ?v= 刷新预览
+          // After completion reload the detail first, then bump ?v= once the latest result list is in
           void reload.then(() => setPreviewVersion((v) => v + 1));
         }
       } else if (job.type === 'stretch' && job.status === 'done') {
@@ -259,9 +259,9 @@ export default function ProcessingPage() {
 
   useReconnectingWebSocket('/ws/events', { enabled: true, onMessage: handleEvent });
 
-  // 对仍处于 pending/running 的 job 每 1s 轮询兜底。
-  // effect 依赖只有稳定的 handleJobUpdate；每次 tick 从 activeJobIdsRef 读最新 id，
-  // job 变为 done/error 后 jobs 更新 → activeJobIdsRef 同步剔除 → 自然停止该 job 的轮询。
+  // Fall back to a 1s poll while a job is still pending/running.
+  // The effect depends only on the stable handleJobUpdate; each tick reads the latest ids from activeJobIdsRef,
+  // and once a job is done/error the jobs update removes it from activeJobIdsRef, which ends its polling.
   useEffect(() => {
     const timer = setInterval(() => {
       const ids = activeJobIdsRef.current.filter(isValidJobId);
@@ -277,7 +277,7 @@ export default function ProcessingPage() {
 
   const frameKey = (type: PhaseType, file: string) => `${type}|${file}`;
 
-  /** 勾选 = 纳入（默认全选）；取消勾选的帧进入对应相位的 exclude 数组 */
+  /** Checked = included (all checked by default); unchecked frames go into the exclude array of their phase */
   const toggleInclude = (type: PhaseType, file: string, checked: boolean) => {
     setExcluded((prev) => {
       const next = new Set(prev);
@@ -287,7 +287,7 @@ export default function ProcessingPage() {
     });
   };
 
-  /** 场级全选：勾选 = 该场全部纳入；取消 = 该场全部进入 exclude */
+  /** Frame-set select all: checked = include the whole set; unchecked = put the whole set into exclude */
   const togglePhaseAll = (type: PhaseType, checked: boolean) => {
     const frames = detail?.frames?.[type] ?? [];
     setExcluded((prev) => {
@@ -301,7 +301,7 @@ export default function ProcessingPage() {
     });
   };
 
-  /** calibrate / stack 请求体统一携带：未勾选帧按相位分组进 exclude */
+  /** Shared by the calibrate / stack bodies: unchecked frames grouped by phase into exclude */
   const buildExclude = useCallback((): ExcludeMap => {
     const map: ExcludeMap = { bias: [], dark: [], flat: [], light: [] };
     if (!detail) return map;
@@ -318,7 +318,7 @@ export default function ProcessingPage() {
     [buildExclude],
   );
 
-  /** 每个场当前纳入（勾选）的帧数，按 ALL_PHASE_TYPES 顺序展示 */
+  /** Number of currently included (checked) frames per set, displayed in ALL_PHASE_TYPES order */
   const includedByPhase = useMemo(() => {
     const counts: Record<PhaseType, number> = { bias: 0, dark: 0, flat: 0, light: 0 };
     if (!detail) return counts;
@@ -351,12 +351,12 @@ export default function ProcessingPage() {
         method: calMethod,
         exclude: buildExclude(),
       });
-      // 提交响应字段是 job_id，立即归一成 JobEventData 写入 jobs，避免幽灵 pending 行
+      // The response field is job_id; normalize it into a JobEventData right away so no ghost pending row appears
       const event = toJobEvent(job, selectedId);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
       message.success(`Calibrate job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setCalSubmitting(false);
     }
@@ -380,7 +380,7 @@ export default function ProcessingPage() {
       setJobs((prev) => ({ ...prev, [event.id]: event }));
       message.success(`Stack job ${job.job_id} submitted (${excludedCountTotal} frames excluded)`);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setStackSubmitting(false);
     }
@@ -391,8 +391,8 @@ export default function ProcessingPage() {
       message.warning('Please select a result file to rescale');
       return;
     }
-    // Bug A 修复 (a)：提交时立即自增 ?v=，即使 WS/轮询事件丢失，图片也会先强制刷新一次；
-    // 任务完成后 handleJobUpdate 会再按 job.id|done 去重自增一次。
+    // Bug A fix (a): bump ?v= right after submitting so the image refreshes once even if WS/poll events are lost;
+    // after completion handleJobUpdate bumps it once more, deduped by job.id|done.
     setPreviewVersion((v) => v + 1);
     setStretchSubmitting(true);
     try {
@@ -406,13 +406,13 @@ export default function ProcessingPage() {
       const event = toJobEvent(job, selectedId);
       setJobs((prev) => ({ ...prev, [event.id]: event }));
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setStretchSubmitting(false);
     }
   };
 
-  /** 手动「刷新预览」：自增 ?v= 并重新加载详情，与 stretch 完成后的刷新路径一致 */
+  /** Manual refresh preview: bump ?v= and reload the detail, the same path used after stretch completes */
   const refreshPreview = useCallback(() => {
     setPreviewVersion((v) => v + 1);
     const selected = selectedIdRef.current;
@@ -425,7 +425,7 @@ export default function ProcessingPage() {
     return types.reduce((acc, t) => acc + ((detail.frames?.[t] ?? []).filter((f) => !excluded.has(frameKey(t, f.file))).length), 0);
   }, [detail, excluded]);
 
-  // 实际落盘帧总数（不是计划帧数）：abort/失败后 denominator 不会虚高。
+  // Frames actually written (not planned frames), so the denominator cannot be inflated after an abort/failure.
   const totalActualFrames = useMemo(() => {
     if (!detail) return 0;
     return ALL_PHASE_TYPES.reduce(
@@ -434,7 +434,7 @@ export default function ProcessingPage() {
     );
   }, [detail]);
 
-  // 只取当前会话的 job（旧负载无 session_id 时保留为全局，兼容旧后端）
+  // Keep only the current session's jobs (a payload without session_id stays global, tolerating old backends)
   const jobsForSelectedSession = useMemo(() => {
     if (!selectedId) return [];
     return Object.values(jobs).filter(
@@ -442,8 +442,8 @@ export default function ProcessingPage() {
     );
   }, [jobs, selectedId]);
 
-  // 步骤条推进：以当前会话「最新一次对应类型 job」为准（rerun 后以新任务覆盖旧状态）；
-  // 没有对应 job 时回退到持久化产物标记，保证刷新/切换后已处理会话仍正确解锁后续步骤。
+  // Step progress follows the latest job of each type in the current session (a rerun overrides the old state);
+  // without such a job it falls back to the persisted artifact marker, so a processed session still unlocks later steps after a refresh/switch.
   const latestJobsByType = useMemo(() => {
     const latest: Partial<Record<JobEventData['type'], JobEventData>> = {};
     jobsForSelectedSession.forEach((job) => {
@@ -468,7 +468,7 @@ export default function ProcessingPage() {
   const stackActive = stackJob?.status === 'pending' || stackJob?.status === 'running';
   const stretchActive = stretchJob?.status === 'pending' || stretchJob?.status === 'running';
 
-  // 步骤条 current：calibrate 完成后进入 Stack 步；stack 完成后进入 Stretch 步；stretch 完成则全部完成
+  // Step current: calibrate done moves to Stack; stack done moves to Stretch; stretch done finishes all of them
   const stepCurrent = stretchDone ? 3 : stackDone ? 2 : calibrateDone ? 1 : 0;
   const stackHint = !calibrateDone
     ? 'Complete Step 1 · Construct Bias/Dark/Flat Master & Calibrate before running Stack.'
@@ -845,7 +845,7 @@ export default function ProcessingPage() {
                     alt="Rescaled preview"
                     style={{ maxWidth: '100%', maxHeight: 560 }}
                     onLoad={(e) => {
-                      // 修复预览可见性：成功后复位 onError 设置过的 display:none
+                      // Fix preview visibility: reset the display:none set by onError once loading succeeds
                       (e.target as HTMLImageElement).style.display = '';
                     }}
                     onError={(e) => {

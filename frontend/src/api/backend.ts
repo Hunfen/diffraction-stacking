@@ -1,8 +1,8 @@
 /**
- * 后端地址管理。
- * - 默认 http://localhost:8000
- * - 支持 env VITE_BACKEND（vite dev 代理目标）
- * - 运行时修改（/settings 页）持久化到 localStorage，立即生效
+ * Backend address management.
+ * - Defaults to http://localhost:8000
+ * - Honors the VITE_BACKEND env var (the vite dev proxy target)
+ * - Runtime changes (Settings page) persist to localStorage and apply immediately
  */
 
 export const DEFAULT_BACKEND = 'http://localhost:8000';
@@ -36,10 +36,10 @@ export function isAbsoluteUrl(url: string): boolean {
 }
 
 /**
- * 图片 / 文件 URL：
- * 契约规定使用后端返回的 url 字段（相对路径）。
- * - dev 模式：直接用 localStorage/env 里的后端地址拼接（运行时修改后端地址后立即生效，WS/图片不经过 vite 代理）
- * - 生产模式：FastAPI 托管 frontend/dist，同源相对路径即可
+ * Image / file URLs:
+ * The contract uses the url field returned by the backend (a relative path).
+ * - dev mode: join with the backend address from localStorage/env (a runtime change applies immediately; WS and images bypass the vite proxy)
+ * - production mode: FastAPI serves frontend/dist, so a same-origin relative path is enough
  */
 export function resolveUrl(url?: string | null): string {
   if (!url) return '';
@@ -51,9 +51,9 @@ export function resolveUrl(url?: string | null): string {
 }
 
 /**
- * WebSocket URL：
- * - dev 模式：直接指向后端地址（支持运行时切换）
- * - 生产模式：从 window.location 推导（wss/ws）
+ * WebSocket URLs:
+ * - dev mode: point straight at the backend address (runtime switching supported)
+ * - production mode: derive from window.location (wss/ws)
  */
 export function wsUrlFor(path: string): string {
   const p = path.startsWith('/') ? path : '/' + path;

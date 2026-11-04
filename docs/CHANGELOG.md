@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Capture set persistence**: the Capture page phase table (each phase's `exposure_us` + frame count) is now stored as a backend draft at `<data_root>/capture_draft.json`, so it survives page switches, page refreshes and backend restarts (`GET/PUT /api/capture/draft`). The draft also keeps each phase's `note` (it is written into every frame's FITS `COMMENT`). Named capture sets are stored at `<data_root>/capture_sets.json` with `GET /api/capture/sets` and `GET/PUT/DELETE /api/capture/set?name=<name>`; a set holds only `type`/`count`/`exposure_us` (never `note`). The Capture page gets a saved-set dropdown plus Save As / Overwrite / Delete, and all set actions are disabled while a capture sequence is active. Saving the draft never modifies the saved sets (they are separate files). Contract: `docs/api.md` §2.6.
+
+### Changed
+
+- **Capture set endpoints take the name as a query parameter**: `GET/PUT/DELETE /api/capture/sets/{name}` became `GET/PUT/DELETE /api/capture/set?name=<name>`, so names containing `/` (and other URL-special characters) can be saved, read back and deleted unchanged. The list endpoint stays `GET /api/capture/sets`.
+- **Capture page locks the phase table while a sequence is active**: the in-row `type` / `count` / `exposure_us` / `note` editors and the "Default Diffraction Set" button are now disabled while the capture state is `running`, `waiting_user` or `capturing`, matching the existing lock on Add Phase and row actions. Clearing the saved-set dropdown no longer issues a `GET /api/capture/set` request (which produced a spurious 404 toast).
+- **Code comments and Python docstrings are English-only**: comments in `backend/app/`, `frontend/src/` and `scripts/backend_smoke.py` plus all 81 module/class/function docstrings in `backend/app/*.py` and `scripts/*.py` were translated to English (documented parameters, return values, side effects and history are preserved). User-facing strings (UI copy, error messages) and `docs/*.md` remain Chinese.
+- **Capture page shows draft read/write failures**: `GET /api/capture/draft` and the debounced `PUT /api/capture/draft` are no longer silent. A corrupted draft file (HTTP 500 naming the file) or any other failure now raises an error toast with the backend message instead of silently falling back to the default template or silently dropping edits. Polling requests (`/api/capture/state`, `/api/sessions`, …) stay silent, so no toast spam is introduced.
+
+### Fixed
+
+- **FITS files open upright in DS9 / GIMP / astropy**: every FITS written by the backend (raw frames, snapshots, masters, calibrated frames, `STACK_*.fits`, stretched 16-bit results) is now stored bottom-up, which is the FITS display convention, and carries `ORIENT='FITS-BOTTOM-UP'`. The reader in `backend/app/fits_io.py` flips the data back only when that marker is present, so the in-memory arrays (and therefore the live JPEG preview, snapshot TIFF/PNG and `STACK_preview.png`) keep the previous orientation and the processing results are numerically unchanged. Existing FITS files without the marker are read exactly as before; historical data is not migrated.
+
+- **Damaged capture set/draft files now fail loudly**: a corrupt `<data_root>/capture_sets.json` or `<data_root>/capture_draft.json` (invalid JSON, non-object top level, malformed `sets`/`phases`) makes the related endpoints return 500 with the file name in the message instead of silently serving an empty state. Neither file is overwritten while it is damaged: `GET` never rewrites it and `PUT` validates the existing bytes before writing, so a single "save empty table" cannot destroy saved sets. Restoring valid JSON (or removing the file) recovers the endpoints immediately; a missing file is still a normal empty state that only the first `PUT` creates.
+
 ## [1.6.0] - 2026-08-24
 
 ### Added

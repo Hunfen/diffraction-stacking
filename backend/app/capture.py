@@ -1,9 +1,10 @@
-"""CaptureService：四相位序列拍摄状态机。
+"""CaptureService: four-phase sequence acquisition state machine.
 
-状态机（按契约）：
-    idle → running → waiting_user（每个相位开始前）→ capturing
-         → … → finished | aborted | error
-LIGHT 相位前的 waiting_user 为**强制人工确认点**，resume 后才继续拍摄。
+State machine (per the contract):
+    idle -> running -> waiting_user (before each phase) -> capturing
+         -> ... -> finished | aborted | error
+The waiting_user before the LIGHT phase is a **mandatory manual confirmation point**;
+acquisition continues only after resume.
 """
 from __future__ import annotations
 
@@ -15,10 +16,10 @@ from pathlib import Path
 
 import numpy as np
 import tifffile
-from astropy.io import fits
 from PIL import Image
 
 from .camera import CameraService
+from .fits_io import write_fits
 from .util import (auto_contrast_8bit, capture_metadata, fits_header_entries,
                    frame_stats, get_captures_dir, get_data_root,
                    get_snapshots_dir, now_iso, now_stamp,
@@ -35,20 +36,6 @@ PROMPTS = {
 }
 
 MAX_CONSECUTIVE_FAILURES = 5
-
-
-def _apply_fits_entries(header, entries: list) -> None:
-    """把 ``fits_header_entries`` 的键值对写入 astropy Header。
-
-    COMMENT 键用 ``add_comment`` 追加（多条不互相覆盖；FITS 头只收 printable
-    ASCII，值在 util 侧已用 ascii_fits_value 处理），其余键直接赋值
-    （``HIERARCH CAM WIDTH`` 等由 astropy 解析为 HIERARCH card）。
-    """
-    for key, value in entries:
-        if key == "COMMENT":
-            header.add_comment(str(value))
-        else:
-            header[key] = value
 
 
 def _empty_state() -> dict:
@@ -78,7 +65,7 @@ class CaptureService:
         self._abort_event = threading.Event()
         self._thread: threading.Thread | None = None
 
-    # ------------------------------------------------------------ 状态
+    # ------------------------------------------------------------ state
     def _set(self, **fields):
         with self._lock:
             self._state.update(fields)
@@ -132,7 +119,7 @@ class CaptureService:
                     "note": ph.get("note") or "",
                 })
             plan_id = "plan-" + uuid.uuid4().hex[:8]
-            # v1.2：session_name 为用户原始输入；effective = 本地时间戳_清洗名。
+            # v1.2: session_name is the raw user input; effective = local timestamp_sanitized name.
             effective = f"{now_stamp()}_{sanitize_session_name(session_name)}"
             self._plan = {
                 "plan_id": plan_id,
@@ -141,7 +128,7 @@ class CaptureService:
             }
             return dict(self._plan)
 
-    # ------------------------------------------------------------ 控制
+    # ------------------------------------------------------------ control
     def start(self) -> dict:
         with self._lock:
             if self._plan is None:
@@ -193,9 +180,9 @@ class CaptureService:
             if self._state["status"] not in ACTIVE_STATUSES:
                 raise RuntimeError("No capture in progress")
             self._abort_event.set()
-            self._resume_event.set()   # 若正在等待人工确认，立即结束
-            # 同步切换到 aborted，避免 API 已返回 aborted 但 state 仍显示
-            # running/waiting_user/capturing。
+            self._resume_event.set()   # End immediately when waiting for manual confirmation
+            # Switch to aborted synchronously so the API does not report aborted while state still shows
+            # running/waiting_user/capturing.
             self._state.update(
                 status="aborted", prompt=None, message="Capture aborted",
                 needs_user=False)
@@ -203,7 +190,7 @@ class CaptureService:
             return {"status": "aborted"}
 
     def shutdown(self) -> None:
-        """服务停机：优雅中止进行中的拍摄并等待采集线程退出。"""
+        """Service shutdown: gracefully abort an in-progress capture and wait for the acquisition thread to exit."""
         with self._lock:
             if self._state["status"] in ACTIVE_STATUSES:
                 self._abort_event.set()
@@ -212,11 +199,11 @@ class CaptureService:
         if thread is not None and thread.is_alive():
             thread.join(timeout=5.0)
 
-    # ------------------------------------------------------------ 执行
+    # ------------------------------------------------------------ execution
     def _run(self, plan: dict) -> None:
         self._created = now_iso()
-        # v1.2：plan 阶段已生成 effective session_name（时间戳_清洗名），
-        # 会话目录 id 与其保持一致。
+        # v1.2: plan already built the effective session_name (timestamp_sanitized name),
+        # and the session folder id stays identical to it.
         session_id = plan["session_name"]
         session_dir = get_captures_dir() / session_id
         try:
@@ -255,13 +242,13 @@ class CaptureService:
                 ptype = phase["type"]
                 self._enter_phase(idx, len(plan["phases"]), phase)
                 if ptype == "light":
-                    # LIGHT 前强制人工确认：needs_user=true，等待 resume
+                    # LIGHT requires manual confirmation: needs_user=true, wait for resume
                     if not self._wait_resume():
                         self._finish("aborted", "Capture aborted")
                         return
                 else:
-                    # 非 light 相位：waiting_user 展示 0.2s（prompt 转入 message）
-                    # 后自动进入 capturing，无需 resume
+                    # Non-light phases: waiting_user is shown for 0.2s (prompt moves into message)
+                    # and then capturing starts automatically, with no resume needed
                     deadline = time.monotonic() + 0.2
                     while time.monotonic() < deadline:
                         if self._abort_event.is_set():
@@ -284,14 +271,14 @@ class CaptureService:
 
     def _enter_phase(self, index: int, total: int, phase: dict) -> None:
         ptype = phase["type"]
-        # 曝光覆盖：非 null 时拍摄前设置（相位结束不恢复，按契约）
+        # Exposure override: set before capturing when not null (not restored afterwards, per contract)
         if phase.get("exposure_us") is not None:
             try:
                 self.camera.set_property("exposure", float(phase["exposure_us"]))
             except Exception as exc:  # noqa: BLE001
                 self._log(f"Failed to set exposure (continuing with current value): {exc}")
-        # Mock 相机场景同步：bias/dark=暗场、flat=均匀照明、light=衍射图案。
-        # 真机无该属性时静默跳过（物理条件由操作者准备）。
+        # Mock camera scene sync: bias/dark = dark field, flat = uniform illumination, light = diffraction pattern.
+        # A real camera without that property is skipped silently (the operator prepares the physical conditions).
         scene = {"bias": "dark", "dark": "dark", "flat": "uniform",
                  "light": "diffraction"}[ptype]
         try:
@@ -317,8 +304,8 @@ class CaptureService:
                 return True
 
     def _optional_property(self, name: str, default=0.0):
-        """读取可选相机属性；某些真机属性（如 device_temperature）可能不存在
-        或返回非有限值（inf/nan），不应让一帧/整个拍摄因此失败。"""
+        """Read an optional camera property; some real-hardware properties (e.g. device_temperature) may not
+        exist or may return a non-finite value (inf/nan), which must not make a frame or the whole capture fail."""
         try:
             return self.camera.get_property(name)
         except Exception as exc:  # noqa: BLE001
@@ -331,8 +318,8 @@ class CaptureService:
         thumbs_dir = group_dir / "thumbs"
         consecutive_failures = 0
         successful_frames = 0
-        # 进入实际拍摄：status 必须是 capturing（非 LIGHT 由 _run 切换，
-        # LIGHT 由 resume 切换；此处兜底保证口径一致）
+        # Start the actual capture: status must be capturing (non-LIGHT is switched by _run,
+        # LIGHT is switched by resume; this guard keeps the two paths consistent)
         self._set(status="capturing", needs_user=False)
         for n in range(1, int(phase["count"]) + 1):
             if self._abort_event.is_set():
@@ -348,12 +335,12 @@ class CaptureService:
                 exposure = self.camera.get_property("exposure")
                 gain = self.camera.get_property("gain")
                 black = self.camera.get_property("black_level")
-                # device_temperature 不是所有真机都稳定提供；缺失/非有限值时
-                # 用默认值写入 FITS 头，不把整帧判为失败。
+                # Not every real camera provides device_temperature reliably; when missing or non-finite
+                # a default goes into the FITS header instead of failing the whole frame.
                 temp = self._optional_property("device_temperature", 0.0)
                 cam = self.camera.device
-                # v1.6：每帧取全量相机参数写入 FITS 头（HIERARCH CAM ...）；
-                # 全量读取失败时退回空 dict，由 _save_fits 用逐帧值兜底。
+                # v1.6: every frame stores the full camera parameter set in the FITS header (HIERARCH CAM ...);
+                # a failed full read falls back to an empty dict and _save_fits uses the per-frame values.
                 props = {}
                 try:
                     props = {p["name"]: p["value"]
@@ -375,7 +362,7 @@ class CaptureService:
                           f"(mean={stats['mean']:.1f}, saturated_pct="
                           f"{stats['saturated_pct']:.2f})")
                 self._push()
-                # 缩略图失败不应使已成功落盘的 FITS 帧被计为失败。
+                # A thumbnail failure must not fail a FITS frame that was already written.
                 try:
                     thumb = auto_contrast_8bit(frame)
                     Image.fromarray(thumb, mode="L").save(
@@ -392,8 +379,8 @@ class CaptureService:
                     return False
                 time.sleep(0.05)
         if successful_frames == 0 and consecutive_failures > 0:
-            # 防止“帧全丢但状态 finished”的假完成：
-            # 该相位一帧都没落盘时按 error 中止，而非继续走 finished。
+            # Guard against a false completion where every frame was lost but the state says finished:
+            # when a phase wrote no frame at all, abort with error instead of moving on to finished.
             self._log(f"{ptype.upper()} all frames failed, auto-aborting")
             self._finish("error", f"{ptype.upper()} all frames failed, auto-aborting")
             return False
@@ -411,19 +398,18 @@ class CaptureService:
                 pass
         self._push()
 
-    # ------------------------------------------------------------ 落盘
+    # ------------------------------------------------------------ file output
     def _save_fits(self, path: Path, frame: np.ndarray, stats: dict,
                    frametype: str, exposure, gain, black, temp, cam, nframe,
                    props: dict | None = None, comment: str = "") -> None:
-        """写一帧 FITS：契约 §3.2 键 + HIERARCH CAM 全量参数 + COMMENT。
+        """Write one FITS frame: contract section 3.2 keys + full HIERARCH CAM parameters + COMMENT.
 
-        ``props`` 为 ``camera.get_properties()`` 的全量映射；缺失的 4 个契约
-        数值键（exposure/gain/black_level/device_temperature）用逐帧读取值
-        兜底（保留旧口径，兼容/日志用途）。``comment`` 为当前相位 note
-        （用户 comment，可含中文；FITS 侧经 ascii_fits_value 转 ASCII）。
+        ``props`` is the full mapping from ``camera.get_properties()``; the four missing contract
+        numeric keys (exposure/gain/black_level/device_temperature) fall back to the values read for
+        this frame (keeping the old behaviour, for compatibility/logging). ``comment`` is the note of
+        the current phase (the user comment, which may contain Chinese; on the FITS side it is
+        converted to ASCII through ascii_fits_value).
         """
-        hdu = fits.PrimaryHDU(np.asarray(frame, dtype=np.uint16))
-        header = hdu.header
         props = dict(props or {})
         props.setdefault("exposure", float(exposure))
         props.setdefault("gain", float(gain))
@@ -438,16 +424,16 @@ class CaptureService:
             int(nframe),
             comment or "",
         )
-        _apply_fits_entries(header, fits_header_entries(meta, stats))
-        hdu.writeto(path, overwrite=True)
+        entries = fits_header_entries(meta, stats)
+        write_fits(path, np.asarray(frame, dtype=np.uint16), entries)
 
     def _write_meta(self, session_dir: Path, session_id: str,
                     plan: dict, status: str) -> None:
         cam = self.camera.device
         meta = {
             "id": session_id,
-            # 名称与目录 id 保持一致；发生 FileExistsError 后缀冲突时也使用
-            # 实际生效的 session_id，而不是原始 plan 名。
+            # Keep the name and the folder id identical; on a FileExistsError suffix collision also use
+            # the session_id that actually took effect, not the raw plan name.
             "name": session_id,
             "created": getattr(self, "_created", None) or now_iso(),
             "status": status,
@@ -466,17 +452,17 @@ class CaptureService:
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
                   props: dict | None = None, folder: str | Path = "",
                   prefix: str = "", comment: str = "") -> dict:
-    """v1.4：单帧快照，文件名恒带时间戳。
+    """v1.4: single-frame snapshot whose filename always carries a timestamp.
 
-    v1.6：FITS 头写全量相机参数（HIERARCH CAM ...）+ 用户 comment
-    （COMMENT，经 ascii_fits_value 转 printable ASCII）；TIFF 改用 tifffile
-    写 ImageDescription(270)/Software(305) + 私有 tag 65000（完整 meta JSON
-    的 UTF-8 字节，含中文 comment）。
+    v1.6: the FITS header holds the full camera parameters (HIERARCH CAM ...) plus the user
+    comment (COMMENT, converted to printable ASCII through ascii_fits_value); TIFF now uses
+    tifffile to write ImageDescription(270)/Software(305) plus private tag 65000 (the UTF-8
+    bytes of the full meta JSON, including the Chinese comment).
 
-    folder 为已解析的绝对目录（调用方保证位于 data_root 内）；
-    prefix 已按 v1.4 口径 sanitize。文件名：
-      有 prefix → <prefix>_<YYYYMMDDTHH-MM-SS>.<ext>
-      无 prefix → <YYYYMMDDTHH-MM-SS>.<ext>
+    folder is an already-resolved absolute directory (the caller guarantees it is inside
+    data_root); prefix was sanitised per the v1.4 rule. Filenames:
+      with prefix -> <prefix>_<YYYYMMDDTHH-MM-SS>.<ext>
+      without prefix -> <YYYYMMDDTHH-MM-SS>.<ext>
     """
     base = get_snapshots_dir().resolve()
     root = get_data_root().resolve()
@@ -492,10 +478,8 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
     if fmt == "fits":
         ext = "fits"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
-        hdu = fits.PrimaryHDU(np.asarray(frame, dtype=np.uint16))
-        _apply_fits_entries(hdu.header,
-                            fits_header_entries(meta, frame_stats(frame)))
-        hdu.writeto(snap_dir / name, overwrite=True)
+        entries = fits_header_entries(meta, frame_stats(frame))
+        write_fits(snap_dir / name, np.asarray(frame, dtype=np.uint16), entries)
     elif fmt == "tiff":
         ext = "tiff"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
@@ -511,8 +495,8 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
     else:
         raise RuntimeError(f"Unsupported snapshot format: {fmt} (only fits|tiff|png)")
 
-    # URL：旧口径（snapshots 目录内）保持 /api/files/snapshots/<rel>/<file>；
-    # v1.4 新口径（data_root 内任意目录）用 /api/files/snapshots/<rel-to-root>/<file>。
+    # URL: the legacy form (inside the snapshots folder) keeps /api/files/snapshots/<rel>/<file>;
+    # the v1.4 form (any folder under data_root) uses /api/files/snapshots/<rel-to-root>/<file>.
     try:
         rel = str(snap_dir.relative_to(base))
     except ValueError:

@@ -12,10 +12,10 @@ import { apiGet, apiPost } from './client';
 import { getPreviewSettings } from './settings';
 
 /**
- * 全局 Acquistion 状态。
+ * Global Acquistion state.
  *
- * 原来 /live 页内部管理 live 流的启停，现在把它提升到 App 级，让顶部导航栏
- * 的按钮和 Live 页内控件共享同一个状态。启停仍通过模块级队列串行化。
+ * The live stream used to be started and stopped inside the /live page. It now lives at App
+ * level so the top-nav button and the Live page controls share one state. Toggles are still serialized by a module-level queue.
  */
 
 export interface LiveStateResponse {
@@ -46,7 +46,7 @@ export function AcquisitionProvider({ children }: { children: ReactNode }) {
   const [acquisitionPending, setAcquisitionPending] = useState(false);
   const mountedRef = useRef(true);
 
-  // 页面刷新后如果后端仍有流在跑，先同步一次开关状态。
+  // After a page refresh, sync the toggle once in case a stream is still running.
   useEffect(() => {
     mountedRef.current = true;
     apiGet<LiveStateResponse>('/api/live/state', { silent: true })
@@ -56,7 +56,7 @@ export function AcquisitionProvider({ children }: { children: ReactNode }) {
         }
       })
       .catch(() => {
-        /* 后端不可用时保持默认关闭 */
+        /* Keep the default off state when the backend is unavailable */
       });
     return () => {
       mountedRef.current = false;
@@ -68,7 +68,7 @@ export function AcquisitionProvider({ children }: { children: ReactNode }) {
     setAcquisitionPending(true);
     try {
       await runLiveAction(async () => {
-        // 先确保没有残留流，再启动。
+        // Make sure no stale stream is left before starting.
         await apiPost('/api/live/stop', undefined, { silent: true }).catch(() => undefined);
         if (!mountedRef.current) return;
         await apiPost('/api/live/start', params, { silent: true });

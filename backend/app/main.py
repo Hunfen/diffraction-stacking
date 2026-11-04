@@ -1,4 +1,4 @@
-"""FastAPI 入口：REST + /ws/live + /ws/events + 静态前端托管。"""
+"""FastAPI entry point: REST + /ws/live + /ws/events + static frontend hosting."""
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +26,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from PIL import Image
 
 from . import APP_VERSION
+from . import capture_store
 from .camera import CameraService, CameraError, ic4_available
 from .capture import ACTIVE_STATUSES, CaptureService, save_snapshot
 from .process import ProcessService
@@ -56,13 +57,13 @@ class NoCacheIndexStaticFiles(StaticFiles):
 
 
 # =========================================================================
-# 原生文件夹选择对话框（服务器本机）
+# Native folder picker dialogs (on the server machine)
 # =========================================================================
 PICKER_DEFAULT_TITLE = "Select Folder"
 
 
 def _run_macos_picker(title: str) -> str | None:
-    """macOS: osascript choose folder → POSIX path。取消返回 None。"""
+    """macOS: osascript choose folder -> POSIX path. Returns None when cancelled."""
     safe_title = (title.replace("\\", "\\\\").replace('"', '\\"')
                   .replace("\r", " ").replace("\n", " "))
     script = f'POSIX path of (choose folder with prompt "{safe_title}")'
@@ -79,7 +80,7 @@ def _run_macos_picker(title: str) -> str | None:
         proc.returncode, stdout, stderr)
     if proc.returncode == 0:
         return stdout or None
-    # 某些 AppleScript 环境即使选择成功也可能以非零退出，但路径已写入 stdout。
+    # Some AppleScript environments exit non-zero even after a successful pick, but the path is already on stdout.
     if stdout and os.path.isabs(stdout):
         return stdout
     stderr_lower = stderr.lower()
@@ -91,7 +92,7 @@ def _run_macos_picker(title: str) -> str | None:
 
 
 def _run_windows_picker(title: str) -> str | None:
-    """Windows: PowerShell FolderBrowserDialog。取消返回 None。"""
+    """Windows: PowerShell FolderBrowserDialog. Returns None when cancelled."""
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms; "
         "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
@@ -116,7 +117,7 @@ def _run_windows_picker(title: str) -> str | None:
 
 
 def _run_linux_picker(title: str) -> str | None:
-    """Linux: 优先 zenity，其次 kdialog。取消/关闭返回 None。"""
+    """Linux: zenity first, then kdialog. Returns None when cancelled or closed."""
     candidates = (
         ["zenity", "--file-selection", "--directory", f"--title={title}"],
         ["kdialog", "--getexistingdirectory", title],
@@ -131,14 +132,14 @@ def _run_linux_picker(title: str) -> str | None:
             continue
         if proc.returncode == 0:
             return proc.stdout.strip() or None
-        # zenity/kdialog 非零退出通常表示用户取消/关闭对话框。
+        # A non-zero exit from zenity/kdialog usually means the user cancelled or closed the dialog.
         return None
     raise RuntimeError(
         "Linux folder picker is not available (install zenity or kdialog)")
 
 
 def _pick_folder(title: str) -> str | None:
-    """按当前平台打开原生目录选择框；返回绝对路径或 None（用户取消）。"""
+    """Open the native directory picker for the current platform; return an absolute path or None (user cancelled)."""
     if sys.platform == "darwin":
         path = _run_macos_picker(title)
     elif sys.platform.startswith("win"):
@@ -154,7 +155,7 @@ def _pick_folder(title: str) -> str | None:
 
 
 # =========================================================================
-# WebSocket 管理器（跨线程推送）
+# WebSocket manager (cross-thread push)
 # =========================================================================
 class EventsManager:
     def __init__(self):
@@ -220,7 +221,7 @@ class LiveManager:
 
 
 # =========================================================================
-# 实时流服务：抓帧线程 + 最新帧队列(maxsize=1) + 推流线程
+# Live streaming service: grab thread + latest-frame queue (maxsize=1) + push thread
 # =========================================================================
 class LiveService:
     MAX_CONSECUTIVE_FAILURES = 5
@@ -292,7 +293,7 @@ class LiveService:
             if (self._grabber is None or not self._grabber.is_alive()) and \
                     (self._pusher is None or not self._pusher.is_alive()):
                 self._grabber = self._pusher = None
-            # 停止实际采集（IC4 stream_stop），否则 ROI 属性仍被硬件锁定。
+            # Stop the actual acquisition (IC4 stream_stop), otherwise the hardware keeps the ROI properties locked.
             try:
                 self.camera.stop_acquisition()
             except Exception:  # noqa: BLE001
@@ -323,7 +324,7 @@ class LiveService:
         while not self._stop.is_set():
             started = time.monotonic()
             if self._triggered():
-                time.sleep(0.02)   # trigger_mode=true 时不自动出帧
+                time.sleep(0.02)   # No automatic frames while trigger_mode=true
                 continue
             try:
                 frame = self.camera.grab_frame()
@@ -334,7 +335,7 @@ class LiveService:
                 elif scale == 0.25:
                     frame = frame[::4, ::4]
                 try:
-                    self._queue.get_nowait()      # 丢弃旧帧，只保留最新
+                    self._queue.get_nowait()      # Drop old frames and keep only the latest
                 except queue.Empty:
                     pass
                 self._queue.put_nowait(frame)
@@ -345,7 +346,7 @@ class LiveService:
                     return
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
-        # 通知推流线程退出
+        # Tell the push thread to exit
         self._stop.set()
 
     def _push_loop(self) -> None:
@@ -379,7 +380,7 @@ class LiveService:
 
 
 # =========================================================================
-# 服务实例
+# Service instances
 # =========================================================================
 camera_service = CameraService()
 events_manager = EventsManager()
@@ -398,7 +399,7 @@ async def lifespan(app: FastAPI):
     live_manager.set_loop(loop)
     yield
     live_service.stop()
-    capture_service.shutdown()   # 优雅中止进行中的拍摄
+    capture_service.shutdown()   # Abort an in-flight capture gracefully
     camera_service.close()
 
 
@@ -414,7 +415,7 @@ app.add_middleware(
 
 
 # =========================================================================
-# 统一错误包裹
+# Uniform error envelope
 # =========================================================================
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
@@ -433,11 +434,11 @@ async def generic_handler(request: Request, exc: Exception):
 
 def raise_cam_err(exc: Exception) -> None:
     msg = str(exc)
-    # IC4 路径：camera.py 已按官方 ErrorCode 归类为 400/404/409/503/500，
-    # 通过 CameraError.status 传递，优先使用；Mock 路径继续走信息匹配。
+    # IC4 path: camera.py already maps official ErrorCode values to 400/404/409/503/500,
+    # exposed through CameraError.status and preferred here; the mock path keeps message matching.
     status = getattr(exc, "status", None)
     if status == 500:
-        # 契约：500 统一返回“服务器内部错误”，不向客户端泄漏异常细节
+        # Contract: 500 always reports an internal server error and never leaks exception details to clients
         logging.getLogger("uvicorn.error").error(
             "ic4 camera error: %s", exc, exc_info=True)
         raise HTTPException(500, "Internal server error")
@@ -456,14 +457,14 @@ def raise_cam_err(exc: Exception) -> None:
     if "Live stream is already running" in msg \
             or "Previous live stream is still stopping" in msg:
         raise HTTPException(409, msg)
-    # 未分类的相机错误：只记日志，不向客户端泄漏异常细节
+    # Unclassified camera errors: log only, never leak exception details to clients
     logging.getLogger("uvicorn.error").error(
         "unclassified camera error: %s", exc, exc_info=True)
     raise HTTPException(500, "Internal server error")
 
 
 # =========================================================================
-# Pydantic 模型
+# Pydantic models
 # =========================================================================
 class OpenBody(BaseModel):
     id: str
@@ -506,6 +507,18 @@ class PlanBody(BaseModel):
     phases: list[PhaseIn] = Field(min_length=1)
 
 
+class DraftPhaseIn(BaseModel):
+    type: str
+    count: int
+    exposure_us: float | None = None
+    # The draft also keeps note (written into each frame's FITS COMMENT); named sets do not store note
+    note: str | None = None
+
+
+class DraftBody(BaseModel):
+    phases: list[DraftPhaseIn] = Field(default_factory=list)
+
+
 class CalibrateBody(BaseModel):
     session_id: str
     sigma: float = 3
@@ -526,7 +539,7 @@ class StretchBody(BaseModel):
 
 
 # =========================================================================
-# 健康与设备
+# Health and device
 # =========================================================================
 @app.get("/api/health")
 def health():
@@ -571,7 +584,7 @@ def settings_put(body: SettingsBody):
 
 @app.post("/api/pick-folder")
 def pick_folder(body: PickFolderBody):
-    """打开服务器本机原生目录选择框（同步 def → FastAPI 线程池执行）。"""
+    """Open the native directory picker on the server host (sync def -> executed by the FastAPI thread pool)."""
     title = (body.title or "").strip() or PICKER_DEFAULT_TITLE
     try:
         path = _pick_folder(title)
@@ -618,7 +631,7 @@ def device_info():
 
 
 # =========================================================================
-# 属性
+# Properties
 # =========================================================================
 @app.get("/api/properties")
 def properties():
@@ -630,7 +643,7 @@ def properties():
 
 @app.get("/api/properties/all")
 def properties_all():
-    """全部相机参数（扩展形状），供 Parameters 标签页使用。"""
+    """All camera parameters (extended shape), used by the Parameters tab."""
     try:
         return ok({"properties": camera_service.get_all_properties()})
     except Exception as exc:  # noqa: BLE001
@@ -647,7 +660,7 @@ def set_property(name: str, body: PropertyBody):
 
 
 # =========================================================================
-# 实时预览与抓拍
+# Live preview and snapshots
 # =========================================================================
 @app.post("/api/live/start")
 def live_start(body: LiveStartBody):
@@ -681,14 +694,14 @@ async def ws_live(websocket: WebSocket):
         live_manager.disconnect(websocket)
 
 
-# v1.4：目录浏览（抓拍文件夹选择）。
+# v1.4: folder browsing (snapshot folder selection).
 @app.get("/api/browse/folders")
 def browse_folders(path: str | None = Query(default=None)):
-    """列出 data_root 内某个目录的直接子目录（不含文件）。
+    """List the direct subdirectories (files excluded) of a directory inside data_root.
 
-    path 缺省/空 → data_root；否则必须是已存在的绝对目录，且 resolve 后
-    == data_root 或位于其内部。任何不满足（相对路径、不存在、越界）都返回
-    400 "Folder must be inside the data root"。
+    path defaults to / is empty -> data_root; otherwise it must be an existing absolute directory
+    that resolves to data_root or lies inside it. Anything else (relative path, missing, outside
+    the root) returns 400 "Folder must be inside the data root".
     """
     root = get_data_root().resolve()
     raw = (path or "").strip()
@@ -709,14 +722,14 @@ def browse_folders(path: str | None = Query(default=None)):
                "folders": folders})
 
 
-# v1.3：snapshot folder 单段相对名校验（相对兼容路径仍限制非法字符）。
+# v1.3: single-segment relative-name check for snapshot folders (the compatible relative path still rejects illegal characters).
 _ILLEGAL_SNAPSHOT_FOLDER_CHARS = frozenset('<>:"|?*')
 
 
 def _snapshot_folder_name(folder: str | None) -> str:
-    """v1.3 兼容：校验单段相对子目录名；空值返回 ""（存 snapshots 根目录）。
+    """v1.3 compatibility: validate a single-segment relative subdirectory name; an empty value returns "" (the snapshots root directory).
 
-    Windows 不允许目录名以点或空格结尾，因此校验后去掉尾部点/空格。
+    Windows does not allow a directory name to end with a dot or a space, so trailing dots/spaces are removed after validation.
     """
     raw = (folder or "").strip()
     if not raw:
@@ -733,12 +746,12 @@ def _snapshot_folder_name(folder: str | None) -> str:
 
 
 def _snapshot_folder(folder: str | None) -> Path:
-    """v1.4：解析快照目标目录（绝对路径）。
+    """v1.4: resolve the snapshot target directory (absolute path).
 
-    - 缺省/空 → data_root/snapshots（兼容旧行为）
-    - 单段相对名（如 "测试文件夹"）→ data_root/snapshots/<name>（兼容旧调用）
-    - 绝对路径：resolve 后必须 == data_root 或位于其内部，否则 400；
-      目录不存在时由调用方 mkdir(parents=True)。
+    - missing/empty -> data_root/snapshots (backwards compatible)
+    - single-segment relative name (e.g. "test folder") -> data_root/snapshots/<name> (legacy callers)
+    - absolute path: after resolve it must equal data_root or lie inside it, otherwise 400;
+      when the directory does not exist, the caller does mkdir(parents=True).
     """
     root = get_data_root().resolve()
     raw = (folder or "").strip()
@@ -771,8 +784,8 @@ def snapshot(body: SnapshotBody):
         cam = camera_service.device
         cam_info = {"name": getattr(cam, "name", "unknown"),
                     "serial": getattr(cam, "serial", "unknown")}
-        # v1.6：全量相机参数写入快照文件头（FITS HIERARCH CAM / TIFF tag 65000）；
-        # 全量读取失败时退回空 dict，FITS 头按 0.0/unknown 兜底。
+        # v1.6: full camera parameters go into the snapshot header (FITS HIERARCH CAM / TIFF tag 65000);
+        # a failed full read falls back to an empty dict and the FITS header uses 0.0/unknown.
         props = {}
         try:
             props = {p["name"]: p["value"]
@@ -798,7 +811,7 @@ def snapshot(body: SnapshotBody):
 
 @app.get("/api/snapshot/folders")
 def snapshot_folders():
-    """v1.3：列出 snapshots 直接子目录；根目录以 name="" 表达。"""
+    """v1.3: list the direct subdirectories of snapshots; the root directory is expressed as name=''."""
     base = get_snapshots_dir()
     entries = [p for p in base.iterdir() if p.is_dir()] if base.is_dir() else []
     folders = [{"name": "", "files": sum(
@@ -812,7 +825,7 @@ def snapshot_folders():
 
 
 # =========================================================================
-# 序列拍摄
+# Capture sequence
 # =========================================================================
 @app.post("/api/capture/plan")
 def capture_plan(body: PlanBody):
@@ -858,7 +871,72 @@ def capture_abort():
 
 
 # =========================================================================
-# Session 与文件
+# Capture sets: phase-table draft + named sets
+# =========================================================================
+def _capture_store_error(exc: Exception) -> HTTPException:
+    """Map store failures; a damaged file is a server-side 500, bad input 400."""
+    if isinstance(exc, capture_store.CaptureStoreError):
+        return HTTPException(500, str(exc))
+    return HTTPException(400, str(exc))
+
+
+@app.get("/api/capture/draft")
+def capture_draft_get():
+    try:
+        return ok(capture_store.get_draft())
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+
+
+@app.put("/api/capture/draft")
+def capture_draft_put(body: DraftBody):
+    try:
+        return ok(capture_store.save_draft([p.model_dump() for p in body.phases]))
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+
+
+@app.get("/api/capture/sets")
+def capture_sets_list():
+    try:
+        return ok({"names": capture_store.list_sets()})
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+
+
+@app.get("/api/capture/set")
+def capture_set_get(name: str = Query(...)):
+    try:
+        entry = capture_store.get_set(name)
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+    if entry is None:
+        raise HTTPException(404, "Capture set does not exist")
+    return ok({"name": capture_store.normalize_name(name), **entry})
+
+
+@app.put("/api/capture/set")
+def capture_set_put(body: DraftBody, name: str = Query(...)):
+    try:
+        entry = capture_store.put_set(name, [p.model_dump() for p in body.phases])
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+    return ok({"name": capture_store.normalize_name(name), **entry})
+
+
+@app.delete("/api/capture/set")
+def capture_set_delete(name: str = Query(...)):
+    try:
+        deleted = capture_store.delete_set(name)
+    except (ValueError, capture_store.CaptureStoreError) as exc:
+        raise _capture_store_error(exc)
+    if not deleted:
+        raise HTTPException(404, "Capture set does not exist")
+    return ok({"name": capture_store.normalize_name(name), "deleted": True})
+
+
+# =========================================================================
+# Sessions and files
 # =========================================================================
 @app.get("/api/sessions")
 def sessions():
@@ -881,11 +959,11 @@ def _validate_rel_path(session_id: str, rel_path: str) -> Path:
             or any(part == ".." for part in rel_path.split("/")):
         raise HTTPException(400, "Invalid path")
     if session_id == "snapshots":
-        # v1.3 兼容：<file>（snapshots 根目录）与 <folder>/<file> 映射到
-        # <data_root>/snapshots/；v1.4：POST /api/snapshot 的目标 folder 可为
-        # data_root 内任意目录，URL 为 <rel-to-data_root>/<file>，故同时支持
-        # 按 data_root 解析。两个候选都必须在对应根目录内（穿越防护）；
-        # 优先返回已存在的旧口径候选，保证旧 URL 行为不变。
+        # v1.3 compatibility: <file> (snapshots root) and <folder>/<file> both map to
+        # <data_root>/snapshots/; v1.4: the target folder of POST /api/snapshot may be
+        # any folder under data_root and the URL is <rel-to-data_root>/<file>, so both
+        # are resolved against data_root. Both candidates must stay inside their root (traversal guard);
+        # the existing legacy candidate wins so old URLs keep behaving as before.
         parts = rel_path.split("/")
         if any(not p for p in parts):
             raise HTTPException(400, "Invalid path")
@@ -930,13 +1008,13 @@ def files(session_id: str, rel_path: str):
     if not path.is_file():
         raise HTTPException(404, f"File does not exist: {rel_path}")
     media = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-    # v1.2：前端拉伸预览等场景依赖最新文件，禁止缓存。
+    # v1.2: the frontend stretch preview and similar views need the latest file, so no caching.
     return FileResponse(path, media_type=media,
                         headers={"Cache-Control": "no-store"})
 
 
 # =========================================================================
-# 处理任务
+# Processing jobs
 # =========================================================================
 EXCLUDE_GROUPS = ("bias", "dark", "flat", "light")
 
@@ -957,7 +1035,7 @@ def _ensure_capture_idle() -> None:
 
 
 def _validate_exclude(session_id: str, exclude: dict | None) -> dict:
-    """校验 exclude：仅文件名匹配；不存在返回 400。"""
+    """Validate exclude: filename matching only; returns 400 when the file does not exist."""
     if exclude is None:
         return {}
     if not isinstance(exclude, dict):
@@ -981,7 +1059,7 @@ def _validate_exclude(session_id: str, exclude: dict | None) -> dict:
             if not target.is_file():
                 raise HTTPException(400, f"exclude file does not exist: {group}/{name}")
             clean.append(name)
-        normalized[group] = list(dict.fromkeys(clean))   # 去重保序
+        normalized[group] = list(dict.fromkeys(clean))   # Deduplicate, keep order
     return normalized
 
 
@@ -1037,13 +1115,13 @@ def process_job(job_id: str):
 
 
 # =========================================================================
-# WebSocket 事件
+# WebSocket events
 # =========================================================================
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket):
     await events_manager.connect(websocket)
     try:
-        # 连接即发送当前拍摄状态快照
+        # Send the current capture state snapshot on connect
         await websocket.send_text(json.dumps(
             {"topic": "capture", "data": capture_service.get_state()},
             ensure_ascii=False))
@@ -1058,7 +1136,7 @@ async def ws_events(websocket: WebSocket):
 
 
 # =========================================================================
-# 根路径与静态前端
+# Root path and static frontend
 # =========================================================================
 @app.get("/")
 def root():
@@ -1074,7 +1152,7 @@ def root():
 
 @app.exception_handler(StarletteHTTPException)
 async def spa_fallback(request: Request, exc: StarletteHTTPException):
-    # 静态资源 404 做 SPA fallback；/api、/ws 保持统一错误包裹
+    # A 404 for static assets falls back to the SPA; /api and /ws keep the uniform error envelope
     if exc.status_code == 404 and INDEX_HTML.is_file() \
             and not request.url.path.startswith("/api") \
             and not request.url.path.startswith("/ws"):

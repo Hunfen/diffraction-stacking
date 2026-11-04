@@ -1,4 +1,4 @@
-"""Session 元数据读取（磁盘扫描）。"""
+"""Session metadata reading (disk scan)."""
 from __future__ import annotations
 
 import json

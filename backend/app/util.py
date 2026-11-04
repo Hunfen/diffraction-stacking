@@ -1,4 +1,4 @@
-"""通用工具：路径、时间、图像编码、统计。"""
+"""Shared utilities: paths, time, image encoding, statistics."""
 from __future__ import annotations
 
 import json
@@ -23,15 +23,15 @@ FITS_HEADER_MEAN = "MEAN"
 FITS_HEADER_STD = "STD"
 FITS_HEADER_SATPCT = "SATPCT"
 
-# session 名称清洗：路径分隔符 + Windows 非法字符 + 空白 → "_"
+# Session name sanitizing: path separators + Windows-illegal characters + whitespace -> "_"
 _ILLEGAL_SESSION_CHARS = re.compile(r'[<>:"/\\|?*\s]')
 
-# snapshot prefix 清洗（v1.4）：与 session 同口径，但允许结果为空
+# Snapshot prefix sanitizing (v1.4): same rules as a session name, but the result may be empty
 _ILLEGAL_PREFIX_CHARS = re.compile(r'[<>:"/\\|?*\s]')
 
 
 def ok(data):
-    """统一成功响应包裹。"""
+    """Wrap a successful response."""
     return {"ok": True, "data": data, "error": None}
 
 
@@ -44,11 +44,12 @@ def now_stamp() -> str:
 
 
 def sanitize_session_name(name: str) -> str:
-    """v1.2：清洗用户原始 session_name。
+    """v1.2: sanitise the raw user session_name.
 
-    去除/替换路径分隔符与 Windows 非法字符 < > : " / \\ | ? * 及空白；
-    空输入返回 "session"。非 ASCII 字符（如中文）与下划线等合法字符保留。
-    Windows 不允许目录名以点结尾，因此清洗后去掉尾部点。
+    Strip or replace path separators, the Windows-invalid characters < > : " / \\ | ? * and whitespace;
+    empty input returns "session". Non-ASCII characters (e.g. Chinese) and legal characters such as
+    underscores are preserved.
+    Windows does not allow a directory name to end with a dot, so trailing dots are removed after sanitising.
     """
     raw = (name or "").strip()
     if not raw:
@@ -58,21 +59,21 @@ def sanitize_session_name(name: str) -> str:
 
 
 def sanitize_prefix(prefix: str | None) -> str:
-    """v1.4：清洗快照文件名 prefix。
+    """v1.4: sanitise the snapshot filename prefix.
 
-    路径分隔符、Windows 非法字符 `< > : " | ? *` 与空白统一替换为 `_`；
-    缺省/空输入返回 ""（允许为空）。非 ASCII 字符（如中文）保留。
+    Path separators, the Windows-invalid characters `< > : " | ? *` and whitespace are all replaced with `_`;
+    missing/empty input returns "" (empty is allowed). Non-ASCII characters (e.g. Chinese) are preserved.
     """
     return _ILLEGAL_PREFIX_CHARS.sub("_", prefix or "")
 
 
 def ascii_fits_value(value: str) -> str:
-    """把任意字符串转为 FITS 头可写的 printable ASCII（v1.2 FIX）。
+    """Convert an arbitrary string to printable ASCII that a FITS header can hold (v1.2 FIX).
 
-    - 优先 transliterate：NFKD 去重音（é→e），组合附加符丢弃；
-    - 其余非 ASCII 字符逐个替换为 "_"；
-    - 非可打印 ASCII 替换为 "_"；
-    - 结果为空时返回 "SESSION"。
+    - Prefer transliteration: NFKD strips accents (é -> e) and combining marks are dropped;
+    - Every remaining non-ASCII character is replaced with "_";
+    - Non-printable ASCII is replaced with "_";
+    - Returns "SESSION" when the result is empty.
     """
     normalized = unicodedata.normalize("NFKD", str(value or ""))
     out: list[str] = []
@@ -87,16 +88,16 @@ def ascii_fits_value(value: str) -> str:
 
 
 def safe_name(name: str) -> str:
-    """兼容旧版内部清洗口径（仅 ASCII 文件名安全字符）。"""
+    """Legacy-compatible internal sanitising rule (ASCII filename-safe characters only)."""
     s = re.sub(r"[^0-9A-Za-z_\-\.]", "_", name).strip("_")
     return s or "session"
 
 
 # =========================================================================
-# 动态数据目录（v1.2）
+# Dynamic data root (v1.2)
 # =========================================================================
 def _load_persisted_data_root() -> Path | None:
-    """读取 backend/.data_root.json；损坏或缺失返回 None。"""
+    """Read backend/.data_root.json; return None when it is corrupt or missing."""
     try:
         if SETTINGS_FILE.is_file():
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -109,10 +110,10 @@ def _load_persisted_data_root() -> Path | None:
 
 
 class DataRootSettings:
-    """单例、线程安全的动态数据目录设置。
+    """Singleton, thread-safe dynamic data-directory setting.
 
-    启动优先级：DIFF_DATA_ROOT > backend/.data_root.json > <repo>/data。
-    运行期 PUT /api/settings 立即切换当前值并持久化到 .data_root.json。
+    Startup priority: DIFF_DATA_ROOT > backend/.data_root.json > <repo>/data.
+    A runtime PUT /api/settings switches the current value immediately and persists it to .data_root.json.
     """
 
     def __init__(self):
@@ -132,7 +133,7 @@ class DataRootSettings:
             return Path(self._root)
 
     def set(self, path: Path | str) -> None:
-        """持久化并切换当前数据根目录（先落盘、后生效）。"""
+        """Persist and switch the current data root (write to disk first, then take effect)."""
         root = Path(path).resolve()
         payload = {"data_root": str(root)}
         with self._lock:
@@ -146,12 +147,12 @@ _settings = DataRootSettings()
 
 
 def get_data_root() -> Path:
-    """动态访问器：每次调用读取当前生效的 data_root。"""
+    """Dynamic accessor: reads the currently effective data_root on every call."""
     return _settings.get()
 
 
 def set_data_root(path: Path | str) -> None:
-    """运行期切换并持久化 data_root（线程安全）。"""
+    """Switch and persist the data_root at runtime (thread-safe)."""
     _settings.set(path)
 
 
@@ -179,7 +180,7 @@ def ensure_dirs() -> None:
 
 
 def auto_contrast_8bit(frame: np.ndarray) -> np.ndarray:
-    """uint16(≤4095) → uint8 灰阶：1%~99% 分位线性映射。"""
+    """uint16 (<=4095) -> uint8 greyscale: linear mapping between the 1% and 99% percentiles."""
     lo, hi = np.percentile(frame, (1.0, 99.0))
     if hi <= lo:
         lo = float(np.min(frame))
@@ -191,7 +192,7 @@ def auto_contrast_8bit(frame: np.ndarray) -> np.ndarray:
 
 
 def frame_stats(frame: np.ndarray) -> dict:
-    """12-bit 帧统计（min/max/mean/std/saturated_pct 均基于 uint16 原始值）。"""
+    """12-bit frame statistics (min/max/mean/std/saturated_pct are all based on raw uint16 values)."""
     arr = np.asarray(frame)
     total = arr.size
     return {
@@ -233,10 +234,10 @@ CONTENT_TYPES = {
 
 
 # =========================================================================
-# FITS/TIFF 采集元数据（v1.6：全量相机参数 + 用户 comment）
+# FITS/TIFF capture metadata (v1.6: full camera parameters + user comment)
 # =========================================================================
 
-# 扩展参数名 → FITS HIERARCH CAM 键（值来自 props dict；Mock 专属键仅在存在时写）。
+# Extension parameter names -> FITS HIERARCH CAM keys (values come from the props dict; mock-only keys are written only when present).
 CAM_HIERARCH_KEYS = (
     ("width", "WIDTH"),
     ("height", "HEIGHT"),
@@ -252,14 +253,14 @@ CAM_HIERARCH_KEYS = (
     ("mock_drift", "MOCKDRIFT"),
 )
 
-# TIFF 私有 tag：完整采集元数据 JSON（UTF-8 字节，含中文 comment）。
+# TIFF private tag: the full capture metadata JSON (UTF-8 bytes, including a Chinese comment).
 TIFF_METADATA_TAG = 65000
 TIFF_SOFTWARE = "Static AstroPhoto"
 
 
 def _meta_float(value, default=0.0) -> float:
-    """把 props 里的数值安全转 float；非数值/非有限值（inf/nan）回退默认值，
-    避免一帧/整个文件写入因此失败。"""
+    """Safely convert a value in props to float; fall back to the default for non-numeric or
+    non-finite values (inf/nan), so that writing a frame or the whole file does not fail because of it."""
     try:
         f = float(value)
     except (TypeError, ValueError):
@@ -270,14 +271,14 @@ def _meta_float(value, default=0.0) -> float:
 def capture_metadata(props: dict, cam_name: str, cam_serial: str,
                      frametype: str, session: str, nframe: int,
                      comment: str = "") -> dict:
-    """构建「采集元数据 dict」：FITS/TIFF 文件头的统一数据源。
+    """Build the capture metadata dict: the single source of truth for FITS/TIFF headers.
 
-    - ``props``：camera.get_properties() 的全量 ``{name: value}`` 映射
-      （13 个契约属性 + Mock 的 mock_pattern/mock_scene/mock_drift）；
-    - 相机身份（name/serial）、frametype、session、nframe、comment 单独存放；
-    - ``comment`` 保留用户原始文本（可含中文）：FITS 头写入时经
-      ``ascii_fits_value()`` 转 printable ASCII，TIFF 私有 tag 65000 直接以
-      UTF-8 字节保存（二者都不丢原始输入，只是存储口径不同）。
+    - ``props``: the full ``{name: value}`` mapping from camera.get_properties()
+      (the 13 contract properties plus Mock's mock_pattern/mock_scene/mock_drift);
+    - Camera identity (name/serial), frametype, session, nframe and comment are stored separately;
+    - ``comment`` keeps the user's raw text (Chinese allowed): the FITS header converts it to
+      printable ASCII through ``ascii_fits_value()``, while TIFF private tag 65000 stores it
+      directly as UTF-8 bytes (neither loses the original input; only the storage form differs).
     """
     return {
         "camera": {"name": str(cam_name or "unknown"),
@@ -292,15 +293,15 @@ def capture_metadata(props: dict, cam_name: str, cam_serial: str,
 
 def fits_header_entries(meta: dict, stats: dict | None = None,
                         date_obs: str | None = None) -> list:
-    """生成 FITS 头键值对列表 ``list[(key, value)]``（可直接写入 astropy 头）。
+    """Build the FITS header key/value list ``list[(key, value)]`` (directly writable into an astropy header).
 
-    - 契约 §3.2 的 8 字符键：DATE-OBS/EXPOSURE/GAIN/BLACKLEV/TEMP/FRAMETYP/
-      CAMERA/SERIAL/SESSION/NFRAME/MEAN/STD/SATPCT/BITPIX（数值取自
-      ``meta["props"]``，缺失时按 0.0/unknown 兜底）；
-    - 扩展参数写 HIERARCH 键：``HIERARCH CAM WIDTH`` 等（仅当 props 中存在
-      对应键时写入，Mock 专属键 MOCKPAT/MOCKSCE/MOCKDRIFT 亦如此）；
-    - 用户 comment：经 ``ascii_fits_value()`` 转 printable ASCII（FITS 头只收
-      ASCII），多行按 ``\\n`` 拆成多条 ``COMMENT``；空行跳过。
+    - The 8-character keys of contract section 3.2: DATE-OBS/EXPOSURE/GAIN/BLACKLEV/TEMP/FRAMETYP/
+      CAMERA/SERIAL/SESSION/NFRAME/MEAN/STD/SATPCT/BITPIX (numeric values come from
+      ``meta["props"]``, falling back to 0.0/unknown when missing);
+    - Extended parameters are written as HIERARCH keys: ``HIERARCH CAM WIDTH`` and so on (only when
+      the corresponding key exists in props; the Mock-only keys MOCKPAT/MOCKSCE/MOCKDRIFT likewise);
+    - User comment: converted to printable ASCII through ``ascii_fits_value()`` (FITS headers only
+      accept ASCII); multiple lines are split on ``\\n`` into several ``COMMENT`` cards; empty lines are skipped.
     """
     props = dict((meta or {}).get("props") or {})
     camera = (meta or {}).get("camera") or {}
@@ -332,14 +333,15 @@ def fits_header_entries(meta: dict, stats: dict | None = None,
 
 
 def tiff_metadata(meta: dict) -> tuple:
-    """生成 tifffile.imwrite 的元数据参数。
+    """Build the metadata arguments for tifffile.imwrite.
 
-    返回 ``(description, extratags, software)``：
-    - ``description``（tag 270 ImageDescription）：参数+身份的 ASCII JSON
-      （可机读；不含中文 comment —— 中文统一走 tag 65000 的 UTF-8 字节）；
-    - ``extratags``：私有 tag 65000 = 完整 meta JSON 的 UTF-8 字节
-      （含中文 comment；dtype 'B'，writeonce=False）；
-    - ``software``（tag 305）："Static AstroPhoto"。
+    Returns ``(description, extratags, software)``:
+    - ``description`` (tag 270 ImageDescription): ASCII JSON of the parameters and identity
+      (machine readable; it does not include the Chinese comment -- Chinese always goes through
+      the UTF-8 bytes of tag 65000);
+    - ``extratags``: private tag 65000 = UTF-8 bytes of the full meta JSON
+      (including the Chinese comment; dtype 'B', writeonce=False);
+    - ``software`` (tag 305): "Static AstroPhoto".
     """
     camera = (meta or {}).get("camera") or {}
     props = dict((meta or {}).get("props") or {})

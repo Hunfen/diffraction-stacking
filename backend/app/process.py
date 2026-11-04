@@ -1,4 +1,4 @@
-"""ProcessService：calibrate / stack / stretch 后台任务（sigma-clipped 处理管线）。"""
+"""ProcessService: calibrate / stack / stretch background jobs (sigma-clipped processing pipeline)."""
 from __future__ import annotations
 
 import json
@@ -8,9 +8,9 @@ import uuid
 from pathlib import Path
 
 import numpy as np
-from astropy.io import fits
 from PIL import Image
 
+from .fits_io import read_fits, read_fits_data, write_fits
 from .util import (ascii_fits_value, auto_contrast_8bit, get_captures_dir,
                    now_iso)
 
@@ -19,7 +19,7 @@ JOB_TYPES = ("calibrate", "stack", "stretch")
 
 
 def _normalize_exclude(exclude: dict | None) -> dict[str, list[str]]:
-    """exclude 归一化：{bias:[], dark:[], flat:[], light:[]}（去重保序）。"""
+    """Normalise exclude into {bias:[], dark:[], flat:[], light:[]} (deduplicated, order preserved)."""
     out = {}
     for g in GROUP_TYPES:
         names = (exclude or {}).get(g) or []
@@ -37,7 +37,7 @@ def _load_group(session_dir: Path, group: str,
     for p in sorted(group_dir.glob("*.fits")):
         if p.name in excluded:
             continue
-        frames.append(np.asarray(fits.getdata(p), dtype=np.float32))
+        frames.append(np.asarray(read_fits_data(p), dtype=np.float32))
     return frames
 
 
@@ -51,18 +51,17 @@ def _load_with_headers(session_dir: Path, group: str,
     for p in sorted(group_dir.glob("*.fits")):
         if p.name in excluded:
             continue
-        with fits.open(p) as hdul:
-            data = np.asarray(hdul[0].data, dtype=np.float32)
-            hdr = hdul[0].header
-        out.append({"file": p.name, "data": data, "header": dict(hdr)})
+        data, hdr = read_fits(p)
+        out.append({"file": p.name, "data": np.asarray(data, dtype=np.float32),
+                    "header": dict(hdr)})
     return out
 
 
 def sigma_clipped_stack(frames: list[np.ndarray], sigma: float, iters: int,
                         method: str = "mean") -> tuple[np.ndarray, float]:
-    """sigma-clipped mean/median（逐像素 μ±σ 裁剪，迭代 iters 次）。
+    """sigma-clipped mean/median (per-pixel mu +/- sigma clipping, iterated iters times).
 
-    返回 (stack, rejected_pct)。
+    Returns (stack, rejected_pct).
     """
     if not frames:
         raise RuntimeError("No usable frames to stack")
@@ -90,7 +89,7 @@ def sigma_clipped_stack(frames: list[np.ndarray], sigma: float, iters: int,
 
 
 def _mean_of_matching_dark(dark_items: list[dict], exposure: float):
-    """与 flat 同曝光（±1 µs）的 dark 帧的 sigma-clipped mean；无则返回 None。"""
+    """sigma-clipped mean of the dark frames whose exposure matches the flat (+/-1 us); None when there is none."""
     match = [it["data"] for it in dark_items
              if abs(float(it["header"].get("EXPOSURE", -999)) - float(exposure)) <= 1.0]
     if not match:
@@ -100,12 +99,9 @@ def _mean_of_matching_dark(dark_items: list[dict], exposure: float):
 
 
 def _write_fits(path: Path, arr: np.ndarray, **extra) -> None:
-    if arr.dtype != np.float32:
-        arr = np.asarray(arr, dtype=np.float32)
-    hdu = fits.PrimaryHDU(arr)
-    for k, v in extra.items():
-        hdu.header[k] = v
-    hdu.writeto(path, overwrite=True)
+    """Write one float32 FITS through the orientation boundary (see ``fits_io``)."""
+    arr = np.asarray(arr, dtype=np.float32)
+    write_fits(path, arr, list(extra.items()))
 
 
 class ProcessService:
@@ -114,7 +110,7 @@ class ProcessService:
         self._jobs: dict[str, dict] = {}
         self._lock = threading.RLock()
 
-    # ------------------------------------------------------------ job 管理
+    # ------------------------------------------------------------ job management
     def create_job(self, jtype: str, params: dict) -> dict:
         if jtype not in JOB_TYPES:
             raise RuntimeError(f"Unknown job type: {jtype}")
@@ -170,7 +166,7 @@ class ProcessService:
             "session_id": job.get("session_id"),
         })
 
-    # ------------------------------------------------------------ 执行入口
+    # ------------------------------------------------------------ entry point
     def run_job(self, job_id: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -260,11 +256,11 @@ class ProcessService:
         dark_ref = master_dark if master_dark is not None else 0.0
         flat_ref = master_flat if master_flat is not None else 1.0
         if master_flat is not None:
-            # 防止归一化平场中的 0 值产生除零 NaN
+            # Prevent a zero in a normalized flat from producing a division-by-zero NaN
             flat_ref = np.where(master_flat > 0, master_flat, 1.0).astype(np.float32)
 
-        # 重跑标定时清掉上一次生成的 calibrated/*.fits，避免旧 CAL 文件残留被
-        # _run_stack 全量 glob 时重复/错位叠加（P1 regression）。
+        # A calibration rerun deletes the previous calibrated/*.fits so stale CAL files cannot be
+        # globbed again by _run_stack and stacked twice or misaligned (P1 regression).
         cal_dir = d / "calibrated"
         for old in cal_dir.glob("*.fits"):
             try:
@@ -275,7 +271,7 @@ class ProcessService:
         excluded_light = set(exclude["light"])
         all_light_items = _load_with_headers(d, "light")
         n = 0
-        # 按原始 light 文件顺序编号：CAL 的 NFRAME=原始序号，供 stack 按文件名排除
+        # Number by the original light file order: CAL NFRAME = original index, so stack can exclude by filename
         for orig_idx, item in enumerate(all_light_items):
             if item["file"] in excluded_light:
                 continue
@@ -319,15 +315,15 @@ class ProcessService:
         if not cal_files:
             raise RuntimeError("calibrated/ is empty, run calibrate first")
 
-        # stack 只过滤 light：按原始 light 文件名 → NFRAME 映射跳过对应 CAL
+        # stack filters light frames only: map the original light filename -> NFRAME and skip that CAL
         excluded_light = set(exclude["light"])
         light_names = sorted(p.name for p in (d / "light").glob("*.fits")) \
             if (d / "light").is_dir() else []
         items = []
         for idx, p in enumerate(cal_files):
-            with fits.open(p) as hdul:
-                data = np.asarray(hdul[0].data, dtype=np.float32)
-                nframe = int(hdul[0].header.get("NFRAME", idx + 1))
+            data, hdr = read_fits(p)
+            data = np.asarray(data, dtype=np.float32)
+            nframe = int(hdr.get("NFRAME", idx + 1))
             light_name = light_names[nframe - 1] \
                 if 0 < nframe <= len(light_names) else None
             if light_name is not None and light_name in excluded_light:
@@ -349,7 +345,7 @@ class ProcessService:
         total_exposure_us = sum(
             float(it["header"].get("EXPOSURE", 0)) for it in light_items)
         bg = np.asarray(stacked, dtype=np.float64).ravel()
-        # 背景口径：去掉亮区（>75 分位）后的标准差
+        # Background definition: standard deviation after removing the bright region (above the 75th percentile)
         thr = float(np.percentile(bg, 75))
         background_std = float(np.std(bg[bg <= thr])) if bg.size else 0.0
         n_used = total
@@ -369,12 +365,9 @@ class ProcessService:
         stem = (f"STACK_sigma{sigma_label}" if method == "mean"
                 else f"STACK_median{sigma_label}")
         out_fits = d / "results" / f"{stem}.fits"
-        # v1.1：STACK 保留 float32（BITPIX=-32），不截断/不转 uint16
-        hdu = fits.PrimaryHDU(np.asarray(stacked, dtype=np.float32))
-        hdu.header["SIGMA"] = sigma
-        hdu.header["METHOD"] = method
-        hdu.header["REGIS"] = registration
-        hdu.writeto(out_fits, overwrite=True)
+        # v1.1: STACK keeps float32 (BITPIX=-32) without truncation or uint16 conversion
+        write_fits(out_fits, np.asarray(stacked, dtype=np.float32),
+                   [("SIGMA", sigma), ("METHOD", method), ("REGIS", registration)])
         json.dump(qc, (d / "results" / "qc_report.json").open(
             "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         self._update(job_id, progress=95, message="Writing STACK(float32) and qc_report")
@@ -388,7 +381,7 @@ class ProcessService:
 
     def _register(self, items: list[np.ndarray], job_id: str,
                   total: int) -> list[np.ndarray]:
-        """整数像素 FFT 相位相关配准（以第一帧为参考）。"""
+        """Integer-pixel FFT phase-correlation registration (the first frame is the reference)."""
         ref = items[0]
         h, w = ref.shape
         fy = np.fft.fftfreq(h).reshape(-1, 1)
@@ -433,8 +426,7 @@ class ProcessService:
             raise RuntimeError("white must be greater than black")
 
         self._update(job_id, progress=20, message=f"Reading {result_file}")
-        with fits.open(src) as hdul:
-            data = np.asarray(hdul[0].data, dtype=np.float32)
+        data = np.asarray(read_fits_data(src), dtype=np.float32)
         self._update(job_id, progress=45, message=f"Applying {stretch} stretch")
 
         v = (data - black) / (white - black)
@@ -443,7 +435,7 @@ class ProcessService:
         elif stretch == "log":
             stretched = np.clip(
                 np.log1p(np.maximum(v, 0.0)) / np.log(2.0), 0.0, 1.0)
-        else:  # asinh：软斜率 a = 1/3 范围
+        else:  # asinh: soft slope a = 1/3 of the range
             a = 1.0 / 3.0
             stretched = np.clip(np.arcsinh(np.maximum(v, 0.0) / a)
                                 / np.arcsinh(1.0 / a), 0.0, 1.0)
@@ -452,12 +444,9 @@ class ProcessService:
         stem = Path(result_file).stem
         (d / "results").mkdir(exist_ok=True)
         out_name = f"{stem}_{stretch}.fits"
-        hdu = fits.PrimaryHDU(img16)
-        hdu.header["STRETCH"] = stretch
-        hdu.header["BLACK"] = black
-        hdu.header["WHITE"] = white
-        hdu.writeto(d / "results" / out_name, overwrite=True)
-        # 8-bit PNG 预览（从 16-bit 拉伸结果取高 8 位）
+        write_fits(d / "results" / out_name, img16,
+                   [("STRETCH", stretch), ("BLACK", black), ("WHITE", white)])
+        # 8-bit PNG preview (take the high 8 bits of the 16-bit stretched result)
         preview8 = (img16 >> 8).astype(np.uint8)
         Image.fromarray(preview8, mode="L").save(
             d / "results" / "STACK_preview.png")

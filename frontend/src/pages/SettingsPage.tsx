@@ -77,7 +77,7 @@ export default function SettingsPage() {
       setDataRootInput(next.data_root);
       message.success(`Data directory saved: ${next.data_root}`);
     } catch (err) {
-      // 400 等失败时展示后端 error（apiPut 非 silent 已同时弹出 message.error）
+      // On 400 and other failures show the backend error (a non-silent apiPut already raised message.error)
       setDataDirError(err instanceof Error ? err.message : 'Failed to save. Please check the error returned by the backend');
     } finally {
       setDataDirSaving(false);
@@ -109,7 +109,7 @@ export default function SettingsPage() {
     setHealthStatus('checking');
     setHealthError('');
     try {
-      // 直接请求「目标后端地址」，走统一 axios 封装（silent 不弹错误提示，由本页展示状态）
+      // Call the candidate backend address directly through the shared axios wrapper (silent, so this page reports the status itself)
       const data = await apiGet<HealthInfo>('/api/health', {
         baseURL: normalizeBackend(targetBackend),
         timeout: 5000,
@@ -129,7 +129,7 @@ export default function SettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 数据目录：加载时 GET /api/settings
+  // Data root: GET /api/settings on load
   useEffect(() => {
     void loadDataDir();
   }, [loadDataDir]);
@@ -289,7 +289,7 @@ export default function SettingsPage() {
               </Button>
               <Button
                 onClick={() => {
-                  // 恢复默认 = 清除 localStorage 覆盖，让 VITE_BACKEND env / 默认值按优先级自然生效
+                  // Restore defaults = drop the localStorage override so the VITE_BACKEND env var / default applies again
                   clearBackend();
                   const effective = getBackend();
                   setBackendInput(effective);

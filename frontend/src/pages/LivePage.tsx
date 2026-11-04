@@ -54,7 +54,7 @@ const SNAPSHOT_FOLDER_KEY = 'ds.snapshot.folder';
 const SNAPSHOT_PREFIX_KEY = 'ds.snapshot.prefix';
 const ROI_PROP_NAMES = ['width', 'height', 'offset_x', 'offset_y'] as const;
 
-/** data_root → 默认快照目录 <data_root>/snapshots。 */
+/** data_root -> default snapshot folder <data_root>/snapshots. */
 function defaultSnapshotFolder(dataRoot: string): string {
   return `${dataRoot.replace(/\/+$/, '')}/snapshots`;
 }
@@ -94,7 +94,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** 数值输入提交前：先吸附到 step 网格，再夹到 [min, max]。 */
+/** Before submitting a numeric input: snap to the step grid, then clamp to [min, max]. */
 function snapNumber(value: number, min: number, max: number, step: number): number {
   const raw = Number.isFinite(value) ? value : min;
   const snapped = min + Math.round((raw - min) / step) * step;
@@ -102,8 +102,8 @@ function snapNumber(value: number, min: number, max: number, step: number): numb
 }
 
 /**
- * 滑块显示范围：小范围属性保留完整 min..max；大范围属性（如 exposure 30..30000000）
- * 改为围绕当前值 ±10%（至少 5 个 step）的短窗口，避免滑块跨度过大无法精细调节。
+ * Slider display range: keep the full min..max for small ranges; for wide ones (e.g. exposure 30..30000000)
+ * switch to a short window of +/-10% around the current value (at least 5 steps) so a huge span does not prevent fine control.
  */
 function sliderBounds(
   value: number,
@@ -114,7 +114,7 @@ function sliderBounds(
   const range = max - min;
   const effectiveStep = Math.max(step, 1);
   if (range <= 0) return { min, max };
-  // 全范围“可接受”的标准：最多 200 个 step，或绝对跨度不超过 10000。
+  // The full range is acceptable when it has at most 200 steps or an absolute span of at most 10000.
   if (range / effectiveStep <= 200 || range <= 10000) return { min, max };
   const halfWindow = Math.max(Math.abs(value) * 0.1, effectiveStep * 5);
   return {
@@ -137,7 +137,7 @@ function roiPropertyOf(prop?: CameraProperty): RoiProperty | null {
   };
 }
 
-/** 按属性的 step/min/max 钳制（先吸附到 step 网格，再夹到 [min, max]）。 */
+/** Clamp by the property's step/min/max (snap to the step grid first, then clamp to [min, max]). */
 function snapRoi(value: number, prop: RoiProperty): number {
   const raw = Number.isFinite(value) ? value : prop.min;
   const snapped = prop.min + Math.round((raw - prop.min) / prop.step) * prop.step;
@@ -171,8 +171,8 @@ function drawCrosshair(ctx: CanvasRenderingContext2D, w: number, h: number) {
 }
 
 /**
- * 预览覆盖层：十字准星 + 当前 ROI 框（预览画布即当前 ROI×scale，因此覆盖框为画布内边框）
- * + 拖选中的半透明选框。实时帧每帧重绘，因此每次 drawImage 后都要重画覆盖层。
+ * Preview overlay: crosshair + current ROI box (the preview canvas equals the current ROI x scale, so the overlay box is the canvas border)
+ * + the translucent drag selection. Live frames are redrawn every frame, so the overlay is repainted after each drawImage.
  */
 function drawPreviewOverlay(
   ctx: CanvasRenderingContext2D,
@@ -183,7 +183,7 @@ function drawPreviewOverlay(
   if (w <= 0 || h <= 0) return;
   drawCrosshair(ctx, w, h);
 
-  // 当前 ROI 覆盖框：虚线描边内缩 1px，避免被裁切
+  // Current ROI overlay box: dashed stroke inset by 1px so it is not clipped
   ctx.save();
   ctx.strokeStyle = 'rgba(255, 170, 40, 0.95)';
   ctx.lineWidth = 2;
@@ -214,7 +214,7 @@ function repaintCanvasOverlay(canvas: HTMLCanvasElement, selection: RoiRect | nu
   if (ctx) drawPreviewOverlay(ctx, canvas.width, canvas.height, selection);
 }
 
-/** 将浏览器鼠标坐标换算到 canvas 内部像素坐标（canvas 内部尺寸 = 当前 ROI × scale）。 */
+/** Convert browser mouse coordinates to canvas pixel coordinates (canvas size = current ROI x scale). */
 function canvasPointFromEvent(
   e: ReactMouseEvent<HTMLCanvasElement>,
   canvas: HTMLCanvasElement,
@@ -251,18 +251,18 @@ function useProperties(onActualChange?: () => void) {
   const [properties, setProperties] = useState<CameraProperty[]>([]);
   const [actuals, setActuals] = useState<Record<string, number | boolean>>({});
   const [loading, setLoading] = useState(true);
-  // deviceOpen：仅在收到 409（明确未打开设备）时为 false；成功拉取时为 true。
-  // 其他错误（500/网络）保持未知，不把“设备已打开但属性读取失败”误报成“未打开”。
+  // deviceOpen: false only after a 409 (device explicitly not open); true after a successful fetch.
+  // Other errors (500/network) stay unknown, so a failed property read is not misreported as "device not open".
   const [deviceOpen, setDeviceOpen] = useState<boolean | null>(null);
   const [propertiesError, setPropertiesError] = useState<string | null>(null);
-  // 请求序号：防止低频轮询与手动 refresh / 初始加载的旧响应覆盖新状态
+  // Request sequence: keep slow polling and manual refresh / initial load responses from overwriting newer state
   const fetchSeqRef = useRef(0);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     const seq = ++fetchSeqRef.current;
     try {
-      // 手动刷新/自动探测：未打开设备返回 409 属预期，silent 不弹 toast，页面用内联 Alert 提示
+      // Manual refresh and auto probe: a 409 for a closed device is expected, silent keeps the toast off and the page shows an inline Alert
       const data = await apiGet<PropertiesData>('/api/properties', { silent: true });
       if (seq === fetchSeqRef.current) {
         setProperties(data.properties);
@@ -284,7 +284,7 @@ function useProperties(onActualChange?: () => void) {
     }
   }, []);
 
-  // 每 5s 的低频静默轮询：不碰 loading（避免参数卡频繁闪烁）；409 → deviceOpen=false
+  // Low-frequency silent poll every 5s: leaves loading alone (so parameter cards do not flicker); 409 -> deviceOpen=false
   const pollProperties = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     try {
@@ -307,7 +307,7 @@ function useProperties(onActualChange?: () => void) {
     }
   }, []);
 
-  // 初始加载内联成 promise 链（loading 初值即 true），不在 effect 里同步调用会 setState 的刷新函数
+  // Initial load is an inline promise chain (loading starts true) so the effect never calls a refresh that setStates synchronously
   useEffect(() => {
     let cancelled = false;
     const seq = ++fetchSeqRef.current;
@@ -379,13 +379,13 @@ function NumericPropertyRow({
   const max = prop.max ?? 100000;
   const step = prop.step ?? 1;
   const readOnly = Boolean(prop.readonly);
-  // Exposure 使用对数滑块，把 30µs~30s 的大跨度压缩成可精细调节的滑轨。
+  // Exposure uses a logarithmic slider to squeeze the 30us..30s span into a finely controllable track.
   const isLogScale = prop.name === 'exposure';
   const { min: sliderMin, max: sliderMax } = sliderBounds(value, min, max, step);
-  // 记录最后一次从 prop 同步进来的值；本地编辑/拖动期间不覆盖 pending 值。
+  // Remember the last value synced from the prop; local edits/drags never overwrite the pending value.
   const lastPropValueRef = useRef(Number(prop.value));
 
-  // 外部 prop 变化仅在非编辑状态下同步到本地 UI，避免轮询/后端回写打断用户输入。
+  // An external prop change syncs into the local UI only when not editing, so polling or a backend write-back cannot interrupt typing.
   useEffect(() => {
     const next = Number(prop.value);
     if (!editing && Number.isFinite(next) && next !== lastPropValueRef.current) {
@@ -397,14 +397,14 @@ function NumericPropertyRow({
   const apply = useCallback(
     async (v: number) => {
       if (!Number.isFinite(v) || readOnly) return;
-      // 对数滑块的 step 只是 UI 展示步进，写入时不做 29999.97 这种大 UI step 吸附，
-      // 只按 min/max 钳制；后端会按相机实际 increment 处理。
+      // The log slider step is a UI display increment only; writes do not snap to a large UI step like 29999.97,
+      // they are clamped by min/max only; the backend then applies the camera's real increment.
       const clamped = isLogScale
         ? Math.min(max, Math.max(min, v))
         : snapNumber(v, min, max, step);
       setValue(clamped);
       setEditing(false);
-      // 提交期间不要让 effect 用旧的 prop 值覆盖本地 pending 值。
+      // While a write is in flight the effect must not overwrite the local pending value with an old prop.
       lastPropValueRef.current = Number(prop.value);
       try {
         const result = await onPut(prop.name, clamped);
@@ -510,7 +510,7 @@ function BoolPropertyRow({
   onPut: (name: string, value: boolean) => Promise<PropertyPutResult | undefined>;
   compact?: boolean;
 }) {
-  // 外部值变化由父组件 key={name:value} 触发重挂载同步，避免 effect 内 setState
+  // External value changes remount via the parent's key={name:value}, which keeps setState out of the effect
   const [value, setValue] = useState<boolean>(() => Boolean(prop.value));
 
   const apply = async (v: boolean) => {
@@ -577,7 +577,7 @@ function RoiNumberInput({
   disabled?: boolean;
   onPut: (name: string, value: number) => Promise<PropertyPutResult | undefined>;
 }) {
-  // 外部值变化由父组件 key={name:value} 触发重挂载同步，避免 effect 内 setState
+  // External value changes remount via the parent's key={name:value}, which keeps setState out of the effect
   const [value, setValue] = useState<number>(() => Number(prop.value));
 
   const apply = async (v: number | null) => {
@@ -619,7 +619,7 @@ export default function LivePage() {
     startAcquisition,
     stopAcquisition,
   } = useAcquisition();
-  // Live 页每次挂载读取最新的预览参数（Settings 页修改后进入 /live 即生效）。
+  // Every mount of the Live page reads the latest preview settings (a change on the Settings page applies as soon as /live opens).
   const preview = useMemo(() => getPreviewSettings(), []);
   const livePreviewInfoShownRef = useRef(false);
   useEffect(() => {
@@ -633,7 +633,7 @@ export default function LivePage() {
       duration: 6,
     });
   }, []);
-  // ROI 在采集启动中或采集运行中都被锁住，避免在 start 转换期间写入被采集端拒绝。
+  // The ROI is locked while acquisition is starting or running so a write during the start transition is not rejected.
   const acquisitionLocked = streamStarted || acquisitionPending;
   const {
     properties,
@@ -646,7 +646,7 @@ export default function LivePage() {
     putProperty,
   } = useProperties();
 
-  // 低频静默轮询 /api/properties：页面运行中设备被外部关闭时（409），驱动 deviceWarning 从 false→true
+  // Low-frequency silent poll of /api/properties: when the device is closed externally while the page runs (409), deviceWarning flips false->true
   useEffect(() => {
     const timer = window.setInterval(() => {
       void pollProperties();
@@ -658,17 +658,17 @@ export default function LivePage() {
   const [snapshot, setSnapshot] = useState<SnapshotResult | null>(null);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [folderPicking, setFolderPicking] = useState(false);
-  // 已选快照目录（绝对路径）。localStorage 记住上次选择；无记忆（null/空串）时用 /api/settings 的 data_root + /snapshots。
+  // Selected snapshot folder (absolute path). localStorage remembers the last choice; without one (null/empty) use data_root + /snapshots from /api/settings.
   const [snapshotFolder, setSnapshotFolder] = useState<string | null>(
     () => localStorage.getItem(SNAPSHOT_FOLDER_KEY) || null,
   );
-  // 文件名前缀（可为空）。localStorage 记住上次输入。
+  // Filename prefix (may be empty). localStorage remembers the last input.
   const [snapshotPrefix, setSnapshotPrefix] = useState<string>(
     () => localStorage.getItem(SNAPSHOT_PREFIX_KEY) ?? '',
   );
-  // 快照 comment（可选）：随 POST /api/snapshot 发送，后端写入文件头（FITS COMMENT / TIFF ImageDescription）
+  // Snapshot comment (optional): sent with POST /api/snapshot and written into the file header (FITS COMMENT / TIFF ImageDescription)
   const [snapshotComment, setSnapshotComment] = useState('');
-  // ROI 拖选状态
+  // ROI drag state
   const [dragging, setDragging] = useState(false);
   const [roiBusy, setRoiBusy] = useState(false);
   const roiBusyRef = useRef(false);
@@ -693,7 +693,7 @@ export default function LivePage() {
     }),
     [propByName],
   );
-  // 契约 v1.3：触发模式开关从 Live 页移除（后端属性保留不动）
+  // Contract v1.3: the trigger-mode switch was removed from the Live page (the backend property stays as is)
   const boolProps = useMemo(
     () => ['reverse_x', 'reverse_y', 'auto_exposure', 'auto_gain'].flatMap((name) => {
       const prop = propByName[name];
@@ -724,7 +724,7 @@ export default function LivePage() {
     };
   }, [propByName, preview.scale]);
 
-  // 帧绘制/拖选回调通过 ref 读取最新 ROI 与 scale，避免每帧重建 WebSocket 回调
+  // Frame drawing and drag callbacks read the latest ROI and scale from refs, so the WebSocket callback is not rebuilt per frame
   const roiModelRef = useRef(roiModel);
   useEffect(() => {
     roiModelRef.current = roiModel;
@@ -760,7 +760,7 @@ export default function LivePage() {
         img.src = url;
       }
     } catch {
-      /* 忽略单帧解码错误 */
+      /* Ignore a single frame decode error */
     }
   }, []);
 
@@ -773,7 +773,7 @@ export default function LivePage() {
             setStats(parsed);
           }
         } catch {
-          /* 非 JSON 文本忽略 */
+          /* Ignore non-JSON text */
         }
       } else if (ev.data instanceof Blob) {
         void drawFrame(ev.data);
@@ -787,8 +787,8 @@ export default function LivePage() {
     onMessage: handleMessage,
   });
 
-  // 挂载时自动启动实时预览（如果全局还没在采集），卸载时停止。
-  // start/stop 已提升到全局 AcquisitionProvider，仍通过模块级队列串行化。
+  // Start the live preview on mount (unless acquisition is already running globally) and stop it on unmount.
+  // start/stop now live in the global AcquisitionProvider and are still serialized by a module-level queue.
   useEffect(() => {
     if (!streamStarted && !acquisitionPending) {
       void startAcquisition();
@@ -796,11 +796,11 @@ export default function LivePage() {
     return () => {
       void stopAcquisition();
     };
-    // 只在挂载/卸载时执行；采集状态变化由全局 Provider 管理。
+    // Runs on mount/unmount only; acquisition state changes are owned by the global Provider.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // v1.4 默认快照目录：优先 localStorage；无记忆时 GET /api/settings 取 data_root + /snapshots。
+  // v1.4 default snapshot folder: localStorage first; without a saved value GET /api/settings and use data_root + /snapshots.
   useEffect(() => {
     if (localStorage.getItem(SNAPSHOT_FOLDER_KEY)) return;
     let cancelled = false;
@@ -809,7 +809,7 @@ export default function LivePage() {
         if (!cancelled) setSnapshotFolder(defaultSnapshotFolder(data.data_root));
       })
       .catch(() => {
-        // 后端不可用/加载失败：保持空值，POST /api/snapshot 缺省 folder 时后端会落到 data_root/snapshots
+        // Backend unavailable or load failed: keep it empty; when POST /api/snapshot omits folder the backend falls back to data_root/snapshots
         if (!cancelled) setSnapshotFolder('');
       });
     return () => {
@@ -848,7 +848,7 @@ export default function LivePage() {
         comment: snapshotComment,
       });
       setSnapshot(result);
-      // v1.4 返回 folder 为绝对路径、prefix 为 sanitize 后的值；两者都写入 localStorage
+      // v1.4 returns folder as an absolute path and prefix sanitized; both are stored in localStorage
       const savedFolder = typeof result.folder === 'string' ? result.folder : snapshotFolder || '';
       const savedPrefix = typeof result.prefix === 'string' ? result.prefix : snapshotPrefix;
       setSnapshotFolder(savedFolder);
@@ -856,13 +856,13 @@ export default function LivePage() {
       setSnapshotPrefix(savedPrefix);
       localStorage.setItem(SNAPSHOT_PREFIX_KEY, savedPrefix);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setSnapshotBusy(false);
     }
   };
 
-  // 预期快照保存路径（仅界面提示）：<folder>/[<prefix>_]YYYYMMDDTHH-MM-SS.<ext>，与后端 now_stamp 口径一致。
+  // Expected snapshot path (UI hint only): <folder>/[<prefix>_]YYYYMMDDTHH-MM-SS.<ext>, matching the backend now_stamp format.
   const expectedSnapshotPath = useMemo(() => {
     const folder =
       snapshotFolder && snapshotFolder.trim() !== '' ? snapshotFolder : 'data_root/snapshots';
@@ -871,7 +871,7 @@ export default function LivePage() {
     return `${folder}/${name}`;
   }, [snapshotFolder, snapshotPrefix, snapshotFormat]);
 
-  // ------------------------------------------------------------------ ROI 拖选
+  // ------------------------------------------------------------------ ROI drag selection
   const startCanvasDrag = useCallback((e: ReactMouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !roiModelRef.current.available || roiBusyRef.current || acquisitionLocked) return;
@@ -892,11 +892,11 @@ export default function LivePage() {
       w: Math.abs(point.x - start.x),
       h: Math.abs(point.y - start.y),
     };
-    // 帧刷新间隙立即重绘选框，保证拖动手感
+    // Repaint the selection box between frame refreshes to keep dragging responsive
     repaintCanvasOverlay(canvas, dragRectRef.current);
   }, []);
 
-  /** 拖选松手：canvas 坐标 → 全画幅坐标 = 当前 offset + 拖选坐标 / scale，四值按 step/min/max 钳制后 PUT。 */
+  /** Drag release: canvas coords -> full-frame coords = current offset + drag coords / scale; all four values are clamped by step/min/max before PUT. */
   const applyDragSelection = useCallback(
     async (rect: RoiRect) => {
       const roi = roiModelRef.current;
@@ -913,7 +913,7 @@ export default function LivePage() {
       const scale = roi.scale;
       const width = snapRoi(rect.w / scale, roi.width);
       const height = snapRoi(rect.h / scale, roi.height);
-      // offset 有效上限随新 width/height 变化：全画幅 max − 新 ROI 尺寸
+      // The effective offset limit follows the new width/height: full-frame max minus the new ROI size
       const offsetXMax = Math.max(roi.offsetX.min, roi.width.max - width);
       const offsetYMax = Math.max(roi.offsetY.min, roi.height.max - height);
       const offsetX = snapRoi(roi.offsetX.value + rect.x / scale, {
@@ -927,7 +927,7 @@ export default function LivePage() {
 
       setRoiBusyState(true);
       try {
-        // 先写尺寸再写偏移：后端写尺寸后会自动钳制 offset，再写入正确偏移
+        // Write the size before the offset: the backend clamps offset on a size write, then the correct offset is written
         await putProperty('width', width);
         await putProperty('height', height);
         await putProperty('offset_x', offsetX);
@@ -935,7 +935,7 @@ export default function LivePage() {
         await refresh();
         message.success(`Capture region set to ${offsetX},${offsetY} ${width}×${height}`);
       } catch {
-        /* 错误已由 api client 统一提示 */
+        /* The api client already reported the error */
       } finally {
         setRoiBusyState(false);
       }
@@ -970,7 +970,7 @@ export default function LivePage() {
     ) return;
     setRoiBusyState(true);
     try {
-      // 重置全画幅：width/height = 相机 max，offset = 0
+      // Reset to the full frame: width/height = camera max, offset = 0
       await putProperty('width', roi.width.max);
       await putProperty('height', roi.height.max);
       await putProperty('offset_x', snapRoi(0, roi.offsetX));
@@ -978,7 +978,7 @@ export default function LivePage() {
       await refresh();
       message.success('Capture region reset to full frame');
     } catch {
-      /* 错误已由 api client 统一提示 */
+      /* The api client already reported the error */
     } finally {
       setRoiBusyState(false);
     }

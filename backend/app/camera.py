@@ -1,6 +1,6 @@
-"""相机抽象层：MockCamera（macOS/无真机开发用）与 IC4Camera（Windows 真机）。
+"""Camera abstraction layer: MockCamera (for development on macOS / without hardware) and IC4Camera (real hardware on Windows).
 
-接口约定（前后端契约之外的后端内部接口）：
+Interface contract (an internal backend interface, on top of the frontend/backend contract):
     open() / close() / grab_frame() -> np.uint16(2D, <=4095)
     get_properties() -> list[dict] / get_property(name) / set_property(name, value)
 """
@@ -26,8 +26,8 @@ FULL_WIDTH = 1920
 FULL_HEIGHT = 1200
 READOUT_NOISE_ADU = 1.5
 HOT_PIXEL_FRACTION = 0.0005
-# 泊松噪声混合口径：低计数用精确泊松，高计数用高斯近似（σ=√λ），
-# 与契约“泊松噪声（√signal）”一致，并把全分辨率帧生成压进 15fps 预算
+# Poisson noise mix: exact Poisson for low counts, Gaussian approximation (sigma=sqrt(lambda)) for high counts,
+# matching the contract "Poisson noise (sqrt(signal))" while keeping full-frame generation inside the 15 fps budget
 POISSON_EXACT_MAX_LAMBDA = 24.0
 
 
@@ -58,9 +58,9 @@ def _prop(name, label, value, ptype, *, min_=None, max_=None, step=None,
     return p
 
 
-# 扩展属性形状（Parameters 标签页 / GET /api/properties/all）：
-# 在 _prop 基础上增加 type=string/command、value=string|null、以及
-# locked/available/visibility 三个可选字段。
+# Extended property shape (Parameters tab / GET /api/properties/all):
+# adds type=string/command and value=string|null on top of _prop, plus
+# the three optional fields locked/available/visibility.
 def _prop_all(name, label, value, ptype, *, min_=None, max_=None, step=None,
               unit="", readonly=False, options=None, locked=False,
               available=True, visibility=None):
@@ -78,7 +78,7 @@ def _prop_all(name, label, value, ptype, *, min_=None, max_=None, step=None,
     return p
 
 
-# GenICam 属性类型 → 扩展形状 type（与 dump_camera_props.py 的 _TYPE_MAP 对齐）。
+# GenICam property types -> extended shape type (aligned with _TYPE_MAP in dump_camera_props.py).
 _GENICAM_TYPE_MAP = {
     "INTEGER": "int",
     "FLOAT": "float",
@@ -88,7 +88,7 @@ _GENICAM_TYPE_MAP = {
     "BOOL": "bool",
     "STRING": "string",
     "COMMAND": "command",
-    # Category/Register/Entry/Port 节点无标量值，按 string+null 呈现（不可写）。
+    # Category/Register/Entry/Port nodes have no scalar value and are shown as string+null (not writable).
     "CATEGORY": "string",
     "REGISTER": "string",
     "ENUMENTRY": "string",
@@ -110,27 +110,27 @@ class BaseCamera:
     def opened(self) -> bool:
         return self._opened
 
-    def open(self) -> None:  # pragma: no cover - 子类实现
+    def open(self) -> None:  # pragma: no cover - subclass implementation
         raise NotImplementedError
 
     def close(self) -> None:
         self._opened = False
 
-    def grab_frame(self) -> np.ndarray:  # pragma: no cover - 子类实现
+    def grab_frame(self) -> np.ndarray:  # pragma: no cover - subclass implementation
         raise NotImplementedError
 
     def stop_acquisition(self) -> None:
-        """停止设备采集但保持设备打开（默认为空操作）。
+        """Stop device acquisition but keep the device open (no-op by default).
 
-        真机（IC4）在这里调用 stream_stop，让属性从 locked 状态解除；
-        Mock 没有硬件采集锁，直接无操作即可。
+        Real hardware (IC4) calls stream_stop here so that properties are released from the locked state;
+        Mock has no hardware acquisition lock, so a no-op is enough.
         """
 
-    def get_properties(self) -> list[dict]:  # pragma: no cover - 子类实现
+    def get_properties(self) -> list[dict]:  # pragma: no cover - subclass implementation
         raise NotImplementedError
 
-    def get_all_properties(self) -> list[dict]:  # pragma: no cover - 子类实现
-        """返回相机【全部】可控参数（扩展形状），供 Parameters 标签页使用。"""
+    def get_all_properties(self) -> list[dict]:  # pragma: no cover - subclass implementation
+        """Return [all] controllable camera parameters (extended shape) for the Parameters tab."""
         raise NotImplementedError
 
     def get_property(self, name: str) -> Any:
@@ -148,22 +148,22 @@ class BaseCamera:
 
 
 class MockCamera(BaseCamera):
-    """合成 LEED/RHEED 静态衍射点阵。
+    """Synthesise a static LEED/RHEED diffraction spot pattern.
 
-    契约要点：
-    - uint16、数值 ≤ 4095；规则格点高斯斑 + 亮 00 斑 + 背景辉光
-      + 读出噪声（高斯 ~1.5 ADU）+ 泊松噪声 + 固定热像素（~0.05%）
-    - exposure 线性放大信号并放大泊松噪声；gain(dB) 倍乘信号与噪声；
-      black_level 为加性偏置；均按 12-bit 截断
-    - 默认 capture region（Width × Height）1024×768，上限 1920×1200；温度随运行时间缓慢上升
-    - 可选亚像素级慢漂移（供 registration 演示）
+    Contract highlights:
+    - uint16, values <= 4095; regular lattice Gaussian spots + bright 00 spot + background glow
+      + readout noise (Gaussian ~1.5 ADU) + Poisson noise + fixed hot pixels (~0.05%)
+    - exposure scales the signal linearly and amplifies the Poisson noise; gain(dB) multiplies signal and noise;
+      black_level is an additive offset; everything is clipped to 12-bit
+    - Default capture region (Width x Height) is 1024x768, maximum 1920x1200; temperature rises slowly with runtime
+    - Optional sub-pixel slow drift (for registration demos)
     """
 
     kind = "mock"
 
-    # GenICam 原始属性名 → 已模拟的 snake_case 键（get_all_properties/get_property/
-    # set_property 都按此映射把两者同步）。Exposure 是 PropId EXPOSURE_TIME 的别名，
-    # JSON 里实际叫 ExposureTime，两者都映射到 exposure。
+    # GenICam raw property names -> simulated snake_case keys (get_all_properties/get_property/
+    # and set_property sync both through this map). Exposure is an alias of PropId EXPOSURE_TIME,
+    # the JSON name is ExposureTime, and both map to exposure.
     _GENICAM_TO_SNAKE = {
         "Exposure": "exposure",
         "ExposureTime": "exposure",
@@ -180,7 +180,7 @@ class MockCamera(BaseCamera):
         "GainAuto": "auto_gain",
         "DeviceTemperature": "device_temperature",
     }
-    # 仅存在于 Mock、不属于真实相机参数（不出现在 /all 的正常路径里）。
+    # Mock-only, not a real camera parameter (never part of the normal /all path).
     _MOCK_ONLY_PROPS = frozenset(("mock_pattern", "mock_scene", "mock_drift"))
     _PROPS_JSON = REPO_ROOT / "docs" / "dmk-33gx249e-camera-props.json"
 
@@ -195,7 +195,7 @@ class MockCamera(BaseCamera):
         self._base_cache: dict[str, np.ndarray] = {}
         self._drift_cache: dict[str, tuple] = {}
         self._hot_full = self._make_hot_pixels()
-        # 扩展属性（JSON 里未映射到 snake_case 的“其余”属性），惰性加载。
+        # Extended properties (the remaining JSON entries with no snake_case mapping), loaded lazily.
         self._json_props: list[dict] | None = None
         self._extra_props: dict[str, dict] | None = None
 
@@ -229,7 +229,7 @@ class MockCamera(BaseCamera):
                                         unit="°C", readonly=True),
         }
 
-    # ------------------------------------------------------------------ 基础
+    # ------------------------------------------------------------------ basics
     def open(self) -> None:
         with self._lock:
             self._opened = True
@@ -240,7 +240,7 @@ class MockCamera(BaseCamera):
         with self._lock:
             self._opened = False
 
-    # ---------------------------------------------------------------- 属性
+    # ---------------------------------------------------------------- properties
     def get_properties(self) -> list[dict]:
         with self._lock:
             props = [dict(p) for p in self._props.values()]
@@ -278,7 +278,7 @@ class MockCamera(BaseCamera):
             raise CameraError(f"Unknown property: {name}")
 
     def _set_mock_prop(self, name: str, value: Any) -> Any:
-        """现有 13 个 snake_case 契约属性（及 mock 专属属性）的读写路径，保持不变。"""
+        """Read/write path for the existing 13 snake_case contract properties (plus mock-only properties); unchanged."""
         p = self._props[name]
         if p["readonly"]:
             raise CameraError(f"Property {name} is read-only")
@@ -310,14 +310,15 @@ class MockCamera(BaseCamera):
             self._clamp_offsets()
         return actual
 
-    # ------------------------------------------------- 扩展属性（Parameters 标签页）
+    # ------------------------------------------------- extended properties (Parameters tab)
     def get_all_properties(self) -> list[dict]:
-        """返回相机【全部】可控参数（扩展形状），供 Parameters 标签页使用。
+        """Return [all] controllable camera parameters (extended shape) for the Parameters tab.
 
-        正常路径：从 docs/dmk-33gx249e-camera-props.json 加载 164 个属性，
-        已映射的 GenICam 名转成 snake_case 键并同步到模拟值；其余属性用
-        ``self._extra_props`` 存/取当前值（对帧无影响）。JSON 缺失时优雅回退
-        到现有模拟属性（仍以扩展形状输出，不抛异常）。
+        Normal path: load the 164 properties from docs/dmk-33gx249e-camera-props.json,
+        turn the mapped GenICam names into snake_case keys and sync them to the simulated values; the
+        remaining properties get/set their current value through ``self._extra_props`` (no effect on
+        frames). When the JSON is missing, degrade gracefully to the existing simulated properties
+        (still emitted in extended shape, no exception raised).
         """
         with self._lock:
             extra = self._ensure_extra_props()
@@ -334,13 +335,13 @@ class MockCamera(BaseCamera):
                     elif gname in extra:
                         result.append(dict(extra[gname]))
                         seen.add(gname)
-                # 兜底：JSON 里缺了某个契约属性时，仍把模拟定义补上。
+                # Fallback: when the JSON lacks a contract property, the simulated definition is still added.
                 for snake in self._props:
                     if snake in self._MOCK_ONLY_PROPS or snake in seen:
                         continue
                     result.append(self._merged_prop(snake, None))
                 return result
-            # 优雅回退：无 JSON → 现有模拟属性转扩展形状。
+            # Graceful fallback: no JSON -> convert the existing simulated properties to the extended shape.
             return [self._merged_prop(snake, None) for snake in self._props]
 
     def _load_json_props(self) -> list[dict] | None:
@@ -351,13 +352,13 @@ class MockCamera(BaseCamera):
             data = json.loads(self._PROPS_JSON.read_text(encoding="utf-8"))
             props = [p for p in (data.get("properties") or [])
                      if isinstance(p, dict)]
-        except Exception as exc:  # noqa: BLE001 - 缺文件/损坏时回退，不抛异常
+        except Exception as exc:  # noqa: BLE001 - fall back on a missing/damaged file instead of raising
             _log.warning("mock properties JSON unavailable (%s), falling back", exc)
         self._json_props = props
         return props or None
 
     def _ensure_extra_props(self) -> dict[str, dict]:
-        """惰性把 JSON 里未映射的属性转成扩展形状（键 = GenICam 名）。"""
+        """Lazily turn the unmapped JSON properties into the extended shape (key = GenICam name)."""
         if self._extra_props is not None:
             return self._extra_props
         extra: dict[str, dict] = {}
@@ -373,7 +374,7 @@ class MockCamera(BaseCamera):
 
     @staticmethod
     def _json_to_extended(p: dict) -> dict:
-        """把 dump JSON 里的单个属性转成扩展形状（保留当前值）。"""
+        """Turn a single property from the dump JSON into the extended shape (keeping the current value)."""
         ptype = _GENICAM_TYPE_MAP.get(str(p.get("type", "")).upper(), "string")
         name = p.get("name") or ""
         entry = _prop_all(
@@ -394,7 +395,7 @@ class MockCamera(BaseCamera):
         return entry
 
     def _merged_prop(self, snake: str, json_p: dict | None) -> dict:
-        """把模拟契约属性与 JSON 元数据合并成扩展形状（值取模拟实时值）。"""
+        """Merge a simulated contract property with the JSON metadata into the extended shape (value = simulated live value)."""
         base = dict(self._props[snake])
         if snake == "device_temperature":
             base["value"] = self._temperature()
@@ -407,13 +408,13 @@ class MockCamera(BaseCamera):
         return base
 
     def _set_extra_prop(self, name: str, value: Any) -> Any:
-        """设置“其余”属性（JSON 里未映射到 snake_case 的属性）。"""
+        """Set a "remaining" property (one that the JSON does not map to snake_case)."""
         entry = self._ensure_extra_props()[name]
         if entry["readonly"]:
             raise CameraError(f"Property {name} is read-only", status=400)
         ptype = entry["type"]
         if ptype == "command":
-            return None  # Mock 执行命令是无操作，契约 actual=null
+            return None  # Executing a command on the mock is a no-op, and the contract expects actual=null
         if ptype == "string":
             actual = str(value)
         elif ptype == "bool":
@@ -470,7 +471,7 @@ class MockCamera(BaseCamera):
             minutes = max(0.0, (time.monotonic() - self._started_monotonic) / 60.0)
         return round(25.0 + 0.05 * minutes, 1)
 
-    # ---------------------------------------------------------------- 图案
+    # ---------------------------------------------------------------- patterns
     def _make_hot_pixels(self) -> np.ndarray:
         n = int(FULL_WIDTH * FULL_HEIGHT * HOT_PIXEL_FRACTION)
         hot = np.zeros((FULL_HEIGHT, FULL_WIDTH), dtype=np.float32)
@@ -486,16 +487,16 @@ class MockCamera(BaseCamera):
         h, w = FULL_HEIGHT, FULL_WIDTH
         cx, cy = w / 2.0, h / 2.0
         y, x = np.mgrid[0:h, 0:w].astype(np.float32)
-        # 荧光屏背景辉光：弱径向衰减 + 轻微亮度梯度（斑点信号占主导）
+        # Phosphor screen glow: weak radial falloff + slight brightness gradient (the spot signal dominates)
         base = 2.0 + 6.0 * np.exp(
             -(((x - cx) ** 2) / (2.0 * 640.0 ** 2)
               + ((y - cy) ** 2) / (2.0 * 460.0 ** 2)))
         base += 2.0 * (1.0 - y / float(h))
         if kind == "leed":
-            ax, ay = 96.0, 96.0          # 正方倒格子
-            sx, sy = 2.4, 2.4            # 圆形高斯斑
+            ax, ay = 96.0, 96.0          # Square reciprocal lattice
+            sx, sy = 2.4, 2.4            # Circular Gaussian spot
             order_norm = 0.30
-        else:  # rheed：拉长的类条纹斑（椭圆高斯）
+        else:  # rheed: elongated streak-like spot (elliptical Gaussian)
             ax, ay = 150.0, 54.0
             sx, sy = 5.2, 1.7
             order_norm = 0.18
@@ -522,7 +523,7 @@ class MockCamera(BaseCamera):
             for j in range(-max_j, max_j + 1):
                 order2 = i * i + j * j
                 if kind == "leed" and order2 == 0:
-                    amp = spot_amp               # 亮 00 斑
+                    amp = spot_amp               # Bright 00 spot
                 elif kind == "leed":
                     amp = spot_amp / (1.0 + order_norm * order2)
                 else:
@@ -539,7 +540,7 @@ class MockCamera(BaseCamera):
 
     @staticmethod
     def _shift_bilinear(img: np.ndarray, dy: float, dx: float) -> np.ndarray:
-        """亚像素平移（边缘绕回，供慢漂移演示）。"""
+        """Sub-pixel shift (wraps around the edges; for the slow-drift demo)."""
         iy, fy = int(math.floor(dy)), dy - math.floor(dy)
         ix, fx = int(math.floor(dx)), dx - math.floor(dx)
         a00 = np.roll(img, (iy, ix), axis=(0, 1))
@@ -550,8 +551,8 @@ class MockCamera(BaseCamera):
                 + fy * ((1.0 - fx) * a10 + fx * a11))
 
     def _shifted_pattern(self, kind: str, dy: float, dx: float) -> np.ndarray:
-        """漂移平移复用：整数平移的 4 个双线性基底按 (kind, iy, ix) 缓存，
-        整数部分变化时才重新 np.roll，每帧只做加权求和。"""
+        """Drift-shift reuse: the four bilinear bases of an integer shift are cached by (kind, iy, ix),
+        np.roll is redone only when the integer part changes, and each frame just does a weighted sum."""
         iy = int(math.floor(dy))
         ix = int(math.floor(dx))
         fy = dy - iy
@@ -571,7 +572,7 @@ class MockCamera(BaseCamera):
                 + fy * ((1.0 - fx) * a10 + fx * a11))
 
     def _uniform(self) -> np.ndarray:
-        """模拟平场：均匀照明 + 轻微固定 PRNU 梯度（归一化到约 0.5）。"""
+        """Simulated flat field: uniform illumination + a slight fixed PRNU gradient (normalised to about 0.5)."""
         cached = self._base_cache.get("_uniform")
         if cached is not None:
             return cached
@@ -582,7 +583,7 @@ class MockCamera(BaseCamera):
         self._base_cache["_uniform"] = uni.astype(np.float32)
         return self._base_cache["_uniform"]
 
-    # ---------------------------------------------------------------- 帧
+    # ---------------------------------------------------------------- frames
     def grab_frame(self) -> np.ndarray:
         with self._lock:
             if not self._opened:
@@ -599,15 +600,15 @@ class MockCamera(BaseCamera):
             exposure = float(self._props["exposure"]["value"])
             gain_db = float(self._props["gain"]["value"])
             black = float(self._props["black_level"]["value"])
-            # 漂移累计与帧计数统一在锁内更新（线程安全）
+            # Drift accumulation and the frame counter are updated inside the lock (thread-safe)
             if drift:
-                self._drift_y += 0.03   # 亚像素级缓慢漂移
+                self._drift_y += 0.03   # Slow sub-pixel drift
                 self._drift_x += 0.02
             drift_y, drift_x = self._drift_y, self._drift_x
             self._frame_count += 1
 
         if scene == "dark":
-            # 镜头盖模拟：仅暗电流（随曝光缓慢增加）+ 读出噪声 + 热像素
+            # Lens-cap simulation: dark current only (slowly growing with exposure) + read noise + hot pixels
             img = np.full((h, w), 0.001, dtype=np.float32)
         elif scene == "uniform":
             base_full = self._uniform()
@@ -646,10 +647,10 @@ class MockCamera(BaseCamera):
         return out.astype(np.uint16)
 
     def _poisson_noise(self, lam: np.ndarray) -> np.ndarray:
-        """泊松噪声（√signal 口径，向量化）：
-        - λ ≥ 24：高斯近似（σ=√λ，泊松在高计数下的标准近似）；
-        - 0.5 ≤ λ < 24：精确 rng.poisson；
-        - λ < 0.5：Bernoulli 近似（低计数下二事件概率可忽略）。
+        """Poisson noise (sqrt(signal) formulation, vectorised):
+        - lambda >= 24: Gaussian approximation (sigma=sqrt(lambda), the standard high-count Poisson approximation);
+        - 0.5 <= lambda < 24: exact rng.poisson;
+        - lambda < 0.5: Bernoulli approximation (for two events at low counts the probability is negligible).
         """
         low = lam < POISSON_EXACT_MAX_LAMBDA
         phot = self._rng.normal(lam, np.sqrt(lam)).astype(np.float32)
@@ -665,28 +666,28 @@ class MockCamera(BaseCamera):
 
 
 # =========================================================================
-# IC4 真机封装（Windows/Linux；macOS 懒加载失败时给出清晰中文错误）
+# IC4 real-camera wrapper (Windows/Linux; a lazy load failure on macOS yields a clear Chinese error)
 # =========================================================================
 
 _IC4_LIB = None
 _IC4_LIB_ERROR: str | None = None
 _IC4_LOAD_LOCK = threading.Lock()
 
-# ic4 官方 ErrorCode（api-reference.html → Error Handling → ErrorCode）到本服务
-# HTTP 语义的映射；未列出的错误码回落 500。参照契约 docs/api.md §1：
-# 400 参数错误 / 404 不存在 / 409 状态冲突 / 503 相机不可用 / 500 内部错误。
+# Maps ic4 official ErrorCode values (api-reference.html -> Error Handling -> ErrorCode) to this service's
+# HTTP semantics; unlisted codes fall back to 500. Per the contract docs/api.md §1:
+# 400 bad parameter / 404 not found / 409 state conflict / 503 camera unavailable / 500 internal error.
 _IC4_CODE_STATUS = {
-    3: 409,    # InvalidOperation：当前状态下不允许该操作
+    3: 409,    # InvalidOperation: the operation is not allowed in the current state
     4: 500,    # OutOfMemory
     5: 503,    # LibraryNotInitialized
     6: 500,    # DriverError
     7: 400,    # InvalidParamVal
     8: 500,    # ConversionNotSupported
     9: 503,    # NoData
-    13: 503,   # DeviceInvalid：设备被拔出/失效
+    13: 503,   # DeviceInvalid: the device was unplugged or became invalid
     16: 404,   # DeviceNotFound
     17: 503,   # DeviceError
-    18: 400,   # Ambiguous：设备标识不唯一
+    18: 400,   # Ambiguous: the device identifier is not unique
     21: 400,   # ParseError
     27: 503,   # Timeout
     34: 500,   # Incomplete
@@ -697,18 +698,18 @@ _IC4_CODE_STATUS = {
     50: 500,   # BufferTooSmall
     52: 500,   # SinkTypeMismatch
     53: 409,   # SnapAborted
-    101: 400,  # GenICamFeatureNotFound：属性不存在
+    101: 400,  # GenICamFeatureNotFound: the property does not exist
     102: 409,  # GenICamDeviceError
     103: 400,  # GenICamTypeMismatch
-    106: 409,  # GenICamAccessDenied：属性当前不可访问/被锁
+    106: 409,  # GenICamAccessDenied: the property is currently inaccessible or locked
     107: 400,  # GenICamNotImplemented
-    108: 400,  # GenICamValueError：值非法/越界
+    108: 400,  # GenICamValueError: the value is invalid or out of range
     109: 500,  # GenICamChunkdataNotConnected
 }
 
 
 def _ic4_exc_status(exc: Exception) -> int | None:
-    """从 ic4.IC4Exception.code 映射 HTTP 状态；非 ic4 异常返回 None。"""
+    """Map ic4.IC4Exception.code to an HTTP status; return None for non-ic4 exceptions."""
     code = getattr(exc, "code", None)
     if code is None:
         return None
@@ -719,10 +720,10 @@ def _ic4_exc_status(exc: Exception) -> int | None:
 
 
 def _device_serial(info) -> str:
-    """DeviceInfo 序列号（serial 可能为空，此时回落到 unique_name）。
+    """Serial number of a DeviceInfo (serial may be empty, in which case fall back to unique_name).
 
-    依据 guide-device-enumeration.html：DeviceInfo 提供 model_name/serial/
-    unique_name；serial 格式设备相关，并不保证非空。
+    Per guide-device-enumeration.html: DeviceInfo provides model_name/serial/
+    unique_name; the serial format is device specific and is not guaranteed to be non-empty.
     """
     serial = getattr(info, "serial", "")
     if serial:
@@ -732,10 +733,10 @@ def _device_serial(info) -> str:
 
 
 def _load_ic4():
-    """懒加载 imagingcontrol4；不可用时返回 (module|None, error)。
+    """Lazily import imagingcontrol4; return (module|None, error) when it is unavailable.
 
-    Library.init() 只调用一次（guide-getting-started.html：初始化后才能
-    DeviceEnum.devices()）；加锁防止并发首次加载时的重复 init。
+    Library.init() is called only once (guide-getting-started.html: DeviceEnum.devices()
+    requires initialisation first); a lock prevents duplicate init on concurrent first loads.
     """
     global _IC4_LIB, _IC4_LIB_ERROR
     with _IC4_LOAD_LOCK:
@@ -768,7 +769,7 @@ def ic4_available() -> bool:
 
 
 def enumerate_ic4_devices() -> list[dict]:
-    """枚举 ic4 设备（失败返回空列表，不影响 mock 路径）。"""
+    """Enumerate ic4 devices (returns an empty list on failure; the mock path is unaffected)."""
     lib, _ = _load_ic4()
     if lib is None:
         return []
@@ -786,19 +787,19 @@ def enumerate_ic4_devices() -> list[dict]:
 
 
 def _make_queue_sink(lib):
-    """按官方 API 构造 QueueSink。
+    """Build a QueueSink following the official API.
 
-    api-reference.html → Sinks → QueueSink：
-    - 第一个位置参数必须是 QueueSinkListener 实例（当前实现误传 PixelFormat）；
-    - sink_connected 返回 True 时，sink 自动分配流所需的最小缓冲数；
-    - accepted_pixel_formats=[Mono16] 让 ic4 在必要时插入 12-bit→Mono16 的
-      自动转换（numpy_wrap/numpy_copy 仅支持 Mono8/Mono16 等格式，不支持
-      Mono12p/Mono12Packed）；
-    - max_output_buffers 限制输出队列，防止抓取线程跟不上时缓冲无限堆积。
+    api-reference.html -> Sinks -> QueueSink:
+    - the first positional argument must be a QueueSinkListener instance (the current implementation wrongly passes a PixelFormat);
+    - when sink_connected returns True, the sink allocates the minimum number of buffers the stream needs;
+    - accepted_pixel_formats=[Mono16] makes ic4 insert an automatic 12-bit -> Mono16
+      conversion when necessary (numpy_wrap/numpy_copy only support Mono8/Mono16 and similar,
+      not Mono12p/Mono12Packed);
+    - max_output_buffers bounds the output queue so buffers cannot pile up when the grab thread falls behind.
     """
     class _Listener(lib.QueueSinkListener):
         def sink_connected(self, sink, image_type, min_buffers_required):
-            # 官方示例：无需自定义缓冲分配时返回 True，sink 自动分配
+            # Official example: returns True when no custom buffer allocation is needed and the sink allocates
             return True
 
         def frames_queued(self, sink):
@@ -816,22 +817,22 @@ def _make_queue_sink(lib):
 
 
 class IC4Camera(BaseCamera):
-    """imagingcontrol4 真机封装（与 MockCamera 同一接口）。
+    """imagingcontrol4 wrapper for real hardware (same interface as MockCamera).
 
-    ic4 Grabber 状态机（technical-grabber-states.html）：
+    ic4 Grabber state machine (technical-grabber-states.html):
         Initial --device_open--> Device Opened --stream_setup--> Streaming
         --ACQUISITION_START--> Acquisition Active
-        stream_stop --> Device Opened；device_close --> Initial。
-    本实现：open() 只 device_open；首次 grab_frame() 时 stream_setup()
-    （默认 StreamSetupOption.ACQUISITION_START，官方 API 没有 stream_start）；
-    close() 按 stream_stop → device_close 顺序回到 Initial。
+        stream_stop --> Device Opened; device_close --> Initial.
+    This implementation: open() only performs device_open; the first grab_frame() performs stream_setup()
+    (default StreamSetupOption.ACQUISITION_START; the official API has no stream_start);
+    close() returns to Initial in the order stream_stop -> device_close.
     """
 
     kind = "ic4"
 
-    # 契约属性名 → (PropId 常量名, 契约类型, 中文标签, 固定单位)
-    # PropId 常量见 api-reference.html → PropId（EXPOSURE_TIME、GAIN…）；
-    # 注意：官方常量是 EXPOSURE_TIME，不是 EXPOSURE。
+    # Contract property name -> (PropId constant name, contract type, Chinese label, fixed unit)
+    # PropId constants: see api-reference.html -> PropId (EXPOSURE_TIME, GAIN, ...);
+    # note the official constant is EXPOSURE_TIME, not EXPOSURE.
     _SPEC = (
         ("exposure", "EXPOSURE_TIME", "float", "Exposure", "us"),
         ("gain", "GAIN", "float", "Gain", "dB"),
@@ -859,16 +860,16 @@ class IC4Camera(BaseCamera):
         self._streaming = False
         self._lock = threading.RLock()
         self._close_requested = threading.Event()
-        # 成功让设备原生输出 Mono16 后恒按 >>4 归一到低 12 位：
-        # DMK 33GX249e 官方技术手册 §5.1.1.3：Mono16 像素数据在高 12 位。
+        # Once the device outputs native Mono16, shift >>4 to normalize to the low 12 bits:
+        # DMK 33GX249e technical manual §5.1.1.3: Mono16 pixel data sits in the high 12 bits.
         self._always_shift_mono16 = False
 
     @property
     def opened(self) -> bool:
-        """IC4 连接状态必须反映 Grabber 的实际有效性。
+        """The IC4 connection state must reflect the actual validity of the Grabber.
 
-        BaseCamera.opened 只看 _opened，设备被拔出后 _opened 仍为 True，
-        会导致 CameraService.open 短路返回一个已经失效的 Grabber。
+        BaseCamera.opened only looks at _opened, which stays True after the device is unplugged,
+        causing CameraService.open to short-circuit and return an already-invalid Grabber.
         """
         if not self._opened:
             return False
@@ -880,13 +881,13 @@ class IC4Camera(BaseCamera):
         except Exception:  # noqa: BLE001
             return False
 
-    # ---------------------------------------------------------------- 开关
+    # ---------------------------------------------------------------- open/close
     def open(self) -> None:
         with self._lock:
             if self._opened and self._grabber is not None:
                 if self._grabber.is_device_open and self._grabber.is_device_valid:
-                    return  # 幂等：防止重复 device_open
-                # 设备已失效（DeviceInvalid 状态）：先释放旧 Grabber 再重开
+                    return  # Idempotent: prevents a repeated device_open
+                # Device already invalid (DeviceInvalid state): release the old Grabber before opening again
                 self._discard_grabber(self._grabber)
                 self._reset_fields()
             lib, err = _load_ic4()
@@ -905,16 +906,16 @@ class IC4Camera(BaseCamera):
                 if target is None:
                     raise CameraError(f"No ic4 device found with serial {self.serial}",
                                       status=404)
-                # device_open 支持 DeviceInfo 或字符串（api-reference → Grabber.
-                # device_open(dev: DeviceInfo | str)）。用枚举到的 DeviceInfo 打开，
-                # 避免字符串标识歧义（ErrorCode.Ambiguous）。
+                # device_open accepts a DeviceInfo or a string (api-reference -> Grabber.
+                # device_open(dev: DeviceInfo | str)). Opening with the enumerated DeviceInfo
+                # avoids ambiguous string identifiers (ErrorCode.Ambiguous).
                 grabber = lib.Grabber()
                 grabber.device_open(target)
                 if not grabber.is_device_open:
                     raise CameraError(f"ic4 device {self.name} is in an unexpected state after opening",
                                       status=503)
                 sink = _make_queue_sink(lib)
-                # 全部成功后才发布到实例状态，失败路径不会留下半开 Grabber
+                # Publish to the instance state only after everything succeeds, so a failed path never leaves a half-open Grabber
                 self._always_shift_mono16 = self._try_set_native_mono16(grabber, lib)
                 self._grabber = grabber
                 self._sink = sink
@@ -938,12 +939,12 @@ class IC4Camera(BaseCamera):
         self._opened = False
 
     def _try_set_native_mono16(self, grabber, lib) -> bool:
-        """尽量让设备原生输出 Mono16；成功返回 True（高 12 位，需 >>4）。
+        """Try to make the device output Mono16 natively; returns True on success (upper 12 bits, needs >>4).
 
-        guide-configuring-device.html：在 Device Opened 状态通过
-        device_property_map 配置；PropertyMap.try_set_value 对不存在的属性
-        不抛异常、返回 False。api-reference → PropertyMap：int 参数对枚举属性
-        仅在 PixelFormat 上生效，恰好适用这里。
+        guide-configuring-device.html: configure through the device_property_map in the
+        Device Opened state; PropertyMap.try_set_value does not raise for missing properties
+        and returns False. api-reference -> PropertyMap: an int argument only takes effect for enum
+        properties on PixelFormat, which is exactly the case here.
         """
         try:
             mono16 = getattr(lib.PixelFormat, "Mono16", None)
@@ -951,12 +952,12 @@ class IC4Camera(BaseCamera):
                 return False
             pmap = grabber.device_property_map
             if not pmap.try_set_value(lib.PropId.PIXEL_FORMAT, mono16):
-                return False  # 设备不支持 Mono16 → 走 sink 的 12-bit→Mono16 转换
+                return False  # Device without Mono16 support -> use the sink's 12-bit to Mono16 conversion
             try:
                 fmt = pmap.get_value_str(lib.PropId.PIXEL_FORMAT)
                 return fmt == "Mono16"
             except Exception:  # noqa: BLE001
-                return True  # 已成功 set，回读失败仍按 Mono16 处理
+                return True  # set succeeded, so a failed read-back is still treated as Mono16
         except Exception:  # noqa: BLE001
             _log.warning("ic4 PIXEL_FORMAT configuration failed, using sink auto-conversion",
                          exc_info=True)
@@ -964,7 +965,7 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _discard_grabber(grabber) -> None:
-        """回收半初始化 Grabber（stream_stop → device_close）。"""
+        """Release a half-initialised Grabber (stream_stop -> device_close)."""
         if grabber is None:
             return
         try:
@@ -979,7 +980,7 @@ class IC4Camera(BaseCamera):
             pass
 
     def close(self) -> None:
-        self._close_requested.set()   # 让阻塞中的 pop 循环尽快退出
+        self._close_requested.set()   # Let a blocked pop loop exit promptly
         with self._lock:
             grabber = self._grabber
             self._streaming = False
@@ -989,8 +990,8 @@ class IC4Camera(BaseCamera):
             self._opened = False
             if grabber is None:
                 return
-            # 状态机顺序：stream_stop（Streaming→Device Opened）→ device_close
-            # （→Initial）。设备已失效时两调用可能抛错，忽略并继续清理。
+            # State machine order: stream_stop (Streaming->Device Opened) -> device_close
+            # (->Initial). Both calls may raise when the device is already invalid; ignore and keep cleaning up.
             try:
                 if grabber.is_streaming:
                     grabber.stream_stop()
@@ -1005,7 +1006,7 @@ class IC4Camera(BaseCamera):
                              exc_info=True)
 
     def stop_acquisition(self) -> None:
-        """停止采集流但保持设备打开，解除 Width/Height 等采集区域属性的 locked 状态。"""
+        """Stop the acquisition stream but keep the device open, releasing the locked state of acquisition-region properties such as Width/Height."""
         with self._lock:
             grabber = self._grabber
             if grabber is None or not self._opened:
@@ -1026,20 +1027,20 @@ class IC4Camera(BaseCamera):
                               status=503)
         return self._grabber
 
-    # ---------------------------------------------------------------- 帧
+    # ---------------------------------------------------------------- frames
     def grab_frame(self) -> np.ndarray:
         with self._lock:
             grabber = self._ensure_open()
             try:
                 if not grabber.is_streaming:
-                    # 官方 API 无 stream_start()：stream_setup 默认
-                    # StreamSetupOption.ACQUISITION_START，建流即开始采集。
+                    # The official API has no stream_start(): stream_setup defaults to
+                    # StreamSetupOption.ACQUISITION_START, so creating the stream starts acquisition.
                     grabber.stream_setup(self._sink)
                 self._streaming = True
                 buf = self._pop_with_timeout(self.GRAB_TIMEOUT_MS)
                 try:
-                    # numpy_copy 拷贝数据；随后立即 release 把缓冲还给 sink 的
-                    # 空闲队列，避免长期占用设备内存。
+                    # numpy_copy copies the data; release immediately afterwards returns the buffer to the sink's
+                    # free queue so device memory is not held for long.
                     arr = buf.numpy_copy()
                 finally:
                     try:
@@ -1058,9 +1059,9 @@ class IC4Camera(BaseCamera):
                                   status=_ic4_exc_status(exc) or 503)
 
     def _pop_with_timeout(self, timeout_ms: int):
-        """官方 pop_output_buffer() 无 timeout 参数且阻塞；用
-        try_pop_output_buffer()（文档明确说明不抛异常、无帧返回 None）
-        轮询实现超时语义。
+        """The official pop_output_buffer() takes no timeout argument and blocks; timeout semantics are
+        implemented by polling try_pop_output_buffer() (the docs state explicitly that it does not
+        raise and returns None when no frame is available).
         """
         deadline = time.monotonic() + timeout_ms / 1000.0
         while True:
@@ -1081,12 +1082,13 @@ class IC4Camera(BaseCamera):
             time.sleep(0.005)
 
     def _normalize_12bit(self, img: np.ndarray) -> np.ndarray:
-        """把 Mono16 图像归一化为契约口径：uint16、数值 ≤4095（低 12 位）。
+        """Normalise a Mono16 image to the contract form: uint16, values <= 4095 (low 12 bits).
 
-        依据 DMK 33GX249e 官方技术手册 §5.1.1.3：12-bit 传感器的 Mono16
-        数据位于高 12 位，必须右移 4 位。设备原生 Mono16 成功时恒右移；
-        sink 自动转换路径（设备不支持 Mono16 时）做最大值为依据的自适应，
-        该分支未经真机验证，见 docs/reviews/ic4-doc-audit.md。
+        Per the DMK 33GX249e official technical manual section 5.1.1.3: the Mono16 data of a
+        12-bit sensor sits in the upper 12 bits and must be shifted right by 4. When native Mono16 on
+        the device succeeds, the shift is unconditional; the sink auto-conversion path (device without
+        Mono16 support) adapts based on the maximum value; that branch is not verified on real
+        hardware, see docs/reviews/ic4-doc-audit.md.
         """
         if self._always_shift_mono16:
             np.right_shift(img, 4, out=img)
@@ -1095,7 +1097,7 @@ class IC4Camera(BaseCamera):
             np.right_shift(img, 4, out=img)
         return img
 
-    # ---------------------------------------------------------------- 属性
+    # ---------------------------------------------------------------- properties
     def _pmap(self):
         return self._ensure_open().device_property_map
 
@@ -1106,11 +1108,11 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _range_details(prop, lib):
-        """读取 int/float 属性的 min/max/step（PropertyMap 没有 get_range）。
+        """Read min/max/step of an int/float property (PropertyMap has no get_range).
 
-        api-reference：PropInteger/PropFloat 提供 minimum/maximum/
-        increment_mode/increment/valid_value_set；Property 提供
-        is_readonly/is_available/is_locked/type。
+        api-reference: PropInteger/PropFloat provide minimum/maximum/
+        increment_mode/increment/valid_value_set; Property provides
+        is_readonly/is_available/is_locked/type.
         """
         lo = float(prop.minimum)
         hi = float(prop.maximum)
@@ -1133,12 +1135,12 @@ class IC4Camera(BaseCamera):
             except Exception:  # noqa: BLE001
                 step = 1.0
         elif prop.type == lib.PropertyType.FLOAT:
-            # Float increment_mode==NONE：任意值合法，给出一个无害的 UI 步进
+            # Float with increment_mode==NONE: any value is legal, so expose a harmless UI step
             step = max((hi - lo) / 1000.0, 1e-9)
         step = max(step, 1e-9 if prop.type == lib.PropertyType.FLOAT else 1.0)
-        # 部分真机属性会把未实现的 range 暴露为 inf/nan（例如某些只读温度属性），
-        # 直接进入 JSON 会变成 500：Out of range float values are not JSON compliant。
-        # 这类属性无法给出可用的 UI 范围，按“当前不可用”跳过，避免拖垮整个列表。
+        # Some real-camera properties expose an unimplemented range as inf/nan (e.g. read-only temperature),
+        # which turns into a 500 if serialized: Out of range float values are not JSON compliant.
+        # Such properties have no usable UI range, so they are skipped as currently unavailable to keep the list working.
         for label, value in (("value", val), ("minimum", lo),
                              ("maximum", hi), ("step", step)):
             if not math.isfinite(value):
@@ -1175,7 +1177,7 @@ class IC4Camera(BaseCamera):
             try:
                 value = pmap.get_value_bool(pid)
             except Exception:  # noqa: BLE001
-                # TriggerMode 在部分相机上是枚举（On/Off），按字符串归一化
+                # TriggerMode is an enum (On/Off) on some cameras, so normalize it as a string
                 s = str(pmap.get_value_str(pid))
                 value = s.strip().lower() in ("on", "true", "1")
             return _prop(name, label, bool(value), "bool", readonly=readonly)
@@ -1195,19 +1197,19 @@ class IC4Camera(BaseCamera):
                 try:
                     props.append(self._read_prop(pmap, name))
                 except Exception as exc:  # noqa: BLE001
-                    # 相机不支持/暂时不可用/返回非有限值（inf/nan）的属性按契约跳过；
-                    # 记录 warning 方便真机联调时定位是哪条属性被跳过。
+                    # Properties the camera does not support / currently cannot use / returns as non-finite (inf/nan) are skipped per contract;
+                    # a warning is logged so real-camera debugging can tell which property was skipped.
                     _log.warning("ic4 property %s skipped: %s", name, exc)
                     continue
             return props
 
-    # --------------------------------------------------- 全量属性（Parameters 标签页）
+    # --------------------------------------------------- all properties (Parameters tab)
     def get_all_properties(self) -> list[dict]:
-        """通用枚举全部相机属性并转成扩展形状（参照 scripts/dump_camera_props.py）。
+        """Enumerate all camera properties generically and convert them to the extended shape (cf. scripts/dump_camera_props.py).
 
-        首选 ``PropertyMap.all`` / ``iter(pmap)`` 全量遍历；遍历不到时回退到
-        13 个 _SPEC 契约属性（补上 locked/available/visibility）。单个属性读取
-        失败只跳过并记录 warning，不拖垮整个列表。
+        Prefer a full traversal through ``PropertyMap.all`` / ``iter(pmap)``; when that fails, fall
+        back to the 13 _SPEC contract properties (adding locked/available/visibility). A failed read of
+        a single property is only skipped and logged as a warning, without taking down the whole list.
         """
         with self._lock:
             pmap = self._pmap()
@@ -1229,7 +1231,7 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _enumerate_all_props(pmap) -> list:
-        """尽量返回 PropertyMap 里的全部属性对象（与 dump 脚本同思路）。"""
+        """Return as many property objects from the PropertyMap as possible (same approach as the dump script)."""
         all_attr = getattr(pmap, "all", None)
         if all_attr is not None:
             try:
@@ -1248,7 +1250,7 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _all_type(prop, lib) -> str:
-        """按类型判别属性（先判更具体的 Enum/Command/Boolean/String 再判数值）。"""
+        """Classify a property by type (check the more specific Enum/Command/Boolean/String before the numeric ones)."""
         for cls_name, out in (("PropEnumeration", "enum"),
                               ("PropCommand", "command"),
                               ("PropBoolean", "bool"),
@@ -1276,7 +1278,7 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _finite_or_none(value):
-        """转 JSON 安全的数值；非有限/不可转换返回 None。"""
+        """Convert to a JSON-safe number; return None when non-finite / not convertible."""
         try:
             f = float(value)
         except (TypeError, ValueError):
@@ -1289,7 +1291,7 @@ class IC4Camera(BaseCamera):
 
     @staticmethod
     def _read_all_value(prop, pmap, ptype: str):
-        """按类型读取单个属性当前值（command 恒返回 None）。"""
+        """Read the current value of a single property by type (a command always returns None)."""
         if ptype == "command":
             return None
         raw = None
@@ -1305,7 +1307,7 @@ class IC4Camera(BaseCamera):
                 except Exception:  # noqa: BLE001
                     raw = None
         if raw is None:
-            return None  # 读不到值 → value=null，不要误报 False/"None"
+            return None  # Unreadable value -> value=null, never report a bogus False/"None"
         if ptype == "bool":
             if isinstance(raw, str):
                 return raw.strip().lower() in ("true", "on", "1", "yes")
@@ -1328,7 +1330,7 @@ class IC4Camera(BaseCamera):
         return None
 
     def _read_all_prop(self, pmap, prop, lib) -> dict | None:
-        """把一个 IC4 属性对象转成扩展形状；读不出名字/类型则跳过。"""
+        """Convert one IC4 property object to the extended shape; skip it when name/type cannot be read."""
         try:
             name = str(prop.name or "")
         except Exception:  # noqa: BLE001
@@ -1372,7 +1374,7 @@ class IC4Camera(BaseCamera):
         return entry
 
     def _spec_extended_props(self, pmap) -> list[dict]:
-        """全量遍历不可用时的回退：13 个契约属性 + 扩展元数据。"""
+        """Fallback when the full traversal is unavailable: the 13 contract properties + extended metadata."""
         out: list[dict] = []
         for name in (s[0] for s in self._SPEC):
             try:
@@ -1419,7 +1421,7 @@ class IC4Camera(BaseCamera):
         except (TypeError, ValueError):
             raise CameraError(f"Property {name} requires a numeric value", status=400)
         val, lo, hi, _ = self._range_details(prop, lib)
-        v = min(max(v, lo), hi)              # 契约：越界值自动钳制
+        v = min(max(v, lo), hi)              # Contract: out-of-range values are clamped automatically
         try:
             mode = prop.increment_mode
         except Exception:  # noqa: BLE001
@@ -1471,8 +1473,8 @@ class IC4Camera(BaseCamera):
                         try:
                             pmap.set_value(pid, actual_arg)
                         except Exception:
-                            # 部分相机的 bool 契约属性底层是枚举（如 TriggerMode=On/Off），
-                            # 直接用 Python bool 会类型不匹配；回退到常见枚举字符串。
+                            # On some cameras a bool contract property is backed by an enum (e.g. TriggerMode=On/Off),
+                            # so a Python bool would be a type mismatch; fall back to the usual enum strings.
                             candidates = (["On", "True", "1"] if actual_arg
                                           else ["Off", "False", "0"])
                             for cand in candidates:
@@ -1500,9 +1502,9 @@ class IC4Camera(BaseCamera):
                 raise CameraError(f"Failed to read back property {name} after setting it: {exc}",
                                   status=_ic4_exc_status(exc) or 500)
 
-    # ------------------------------------------- 任意属性名 / 任意类型的读写
+    # ------------------------------------------- arbitrary property name / type read-write
     def _find_prop_by_name(self, pmap, name: str):
-        """按名字找属性对象：先全量遍历匹配，再退回 PropId 常量。"""
+        """Find a property object by name: first match during the full traversal, then fall back to the PropId constant."""
         for prop in self._enumerate_all_props(pmap):
             try:
                 if str(prop.name) == name:
@@ -1611,7 +1613,7 @@ class IC4Camera(BaseCamera):
             except Exception as exc:  # noqa: BLE001
                 raise CameraError(f"Failed to execute command {name}: {exc}",
                                   status=_ic4_exc_status(exc) or 400)
-            return None  # command 执行后 actual=null
+            return None  # actual=null after a command runs
         actual = self._coerce_any_value(prop, name, value, ptype)
         try:
             if ptype == "bool":
@@ -1641,7 +1643,7 @@ class IC4Camera(BaseCamera):
 
 
 class CameraService:
-    """设备服务：枚举、打开/关闭、属性读写、抓帧。"""
+    """Device service: enumeration, open/close, property read/write, frame grabbing."""
 
     def __init__(self):
         self._device: BaseCamera | None = None
@@ -1690,7 +1692,7 @@ class CameraService:
             if self._device is not None and self._device.id == cam_id \
                     and self._device.opened:
                 return self._device
-            if self._device is not None:      # 自动关闭旧设备
+            if self._device is not None:      # Close the old device automatically
                 try:
                     self._device.close()
                 except Exception:  # noqa: BLE001

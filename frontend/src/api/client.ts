@@ -2,11 +2,11 @@ import axios, { AxiosError, type AxiosRequestConfig, type AxiosResponse } from '
 import { message } from 'antd';
 import type { ApiEnvelope } from './types';
 
-/** 统一 axios 封装：
- *  - 所有 REST 走 /api 相对路径：dev 由 vite 代理到后端，生产由 FastAPI 托管同源
- *  - 解析 {ok,data,error}：ok=false 时 antd message.error(error)
- *  - 网络/HTTP 错误同样弹错提示
- *  - silent 配置用于轮询等场景，避免错误弹窗刷屏
+/** Shared axios wrapper:
+ *  - all REST calls use relative /api paths: vite proxies them in dev, FastAPI serves them same-origin in production
+ *  - unwraps {ok,data,error}: ok=false raises antd message.error(error)
+ *  - network and HTTP errors raise the same error toast
+ *  - the silent option serves polling and other noisy callers so toasts do not spam
  */
 
 export interface ApiRequestConfig extends AxiosRequestConfig {
@@ -55,7 +55,7 @@ instance.interceptors.response.use(
         if (!silent) message.error(errText);
         return Promise.reject(new ApiError(errText, response.status));
       }
-      // 解包成 data，调用方拿到的直接是业务数据
+      // Unwrap to data so callers receive the payload directly
       return { ...response, data: body.data } as AxiosResponse;
     }
     return response;
@@ -79,6 +79,10 @@ export function apiPost<T>(url: string, body?: unknown, config?: ApiRequestConfi
 
 export function apiPut<T>(url: string, body?: unknown, config?: ApiRequestConfig): Promise<T> {
   return instance.put<unknown, AxiosResponse<T>>(url, body, config).then((r) => r.data);
+}
+
+export function apiDelete<T>(url: string, config?: ApiRequestConfig): Promise<T> {
+  return instance.delete<unknown, AxiosResponse<T>>(url, config).then((r) => r.data);
 }
 
 export default instance;

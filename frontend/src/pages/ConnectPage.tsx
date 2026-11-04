@@ -36,7 +36,7 @@ export default function ConnectPage() {
       const list = await apiGet<DeviceItem[]>('/api/devices');
       setDevices(list);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setLoading(false);
     }
@@ -54,7 +54,7 @@ export default function ConnectPage() {
     }
   }, []);
 
-  // 初始加载内联成 promise 链（loading 初值即 true），不在 effect 里同步调用会 setState 的刷新函数
+  // Initial load is an inline promise chain (loading starts true) so the effect never calls a refresh that setStates synchronously
   useEffect(() => {
     let cancelled = false;
     apiGet<DeviceItem[]>('/api/devices')
@@ -89,7 +89,7 @@ export default function ConnectPage() {
       message.success('Device opened');
       await Promise.all([refreshDevices(), refreshInfo()]);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setActingId(null);
     }
@@ -102,7 +102,7 @@ export default function ConnectPage() {
       message.success('Device closed');
       await Promise.all([refreshDevices(), refreshInfo()]);
     } catch {
-      /* API client 已弹出错误提示 */
+      /* The API client already showed the error */
     } finally {
       setActingId(null);
     }

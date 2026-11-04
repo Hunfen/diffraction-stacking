@@ -1,6 +1,6 @@
-/** 本地设置（localStorage 持久化）：预览 fps / 质量 / 缩放
- *  与后端 /api/live/start 钳制口径一致：fps 1–30 整数、quality 10–100 整数、
- *  scale ∈ {0.25, 0.5, 1.0}（后端校验枚举，非法值返回 400）。
+/** Local settings (persisted in localStorage): preview fps / quality / scale
+ *  Matches the clamping rules of /api/live/start: fps integer 1-30, quality integer 10-100,
+ *  scale in {0.25, 0.5, 1.0} (the backend validates the enum and returns 400 otherwise).
  */
 
 const KEYS = {
@@ -25,7 +25,7 @@ function readNumber(key: string, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
-/** scale 收敛到最接近的允许值 {0.25, 0.5, 1.0}（等价于后端枚举） */
+/** Snap scale to the nearest allowed value {0.25, 0.5, 1.0} (mirrors the backend enum) */
 export function snapScale(value: number): number {
   return ALLOWED_SCALES.reduce((best, allowed) =>
     Math.abs(allowed - value) < Math.abs(best - value) ? allowed : best,

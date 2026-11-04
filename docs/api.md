@@ -19,7 +19,8 @@
 - `ok=false` 时 HTTP 状态码按语义给出：400（参数错误）、404（不存在）、409（状态冲突）、
   500（内部错误）、503（依赖不可用，如平台无法加载 imagingcontrol4）
 - **所有 `error` 与 `prompt` 文案均为英文**（数据类字段如 session/folder 名称不受此限制）
-- 500 响应统一返回 `error:"Internal server error"`，不泄漏内部异常细节
+- 500 响应默认返回 `error:"Internal server error"`，不泄漏内部异常细节；**唯一例外**是拍摄 set/草稿文件损坏，
+  此时 500 的 `error` 会带文件名以便定位（如 `capture_sets.json has an invalid sets object`，见 §2.6）
 - 时间格式：ISO 8601（`YYYY-MM-DDTHH:MM:SS`，本地时区，不带 Z）；FITS `DATE-OBS` 精确到毫秒（`YYYY-MM-DDTHH:MM:SS.mmm`）
 - 帧数据口径：相机 12-bit，内存 uint16，数值 ≤ 4095；FITS 16-bit 存储、数据在低 12 位
 - 数据目录（v1.2）：所有运行时文件统一落在 `data_root` 下（`snapshots/`、`captures/`）。
@@ -371,7 +372,87 @@ query：`?path=<绝对路径，可空>`
   "needs_user": true } }
 ```
 
-### 2.6 Session 与文件
+### 2.6 拍摄 set（相位表草稿与命名 set）
+
+Capture 页相位表（每个相位的 `type` / `count` / `exposure_us`，草稿另含 `note`）有两层持久化，均落在 `data_root` 下：
+
+- `<data_root>/capture_draft.json`：当前草稿，相位表每次改动后自动覆盖写入
+- `<data_root>/capture_sets.json`：用户显式保存的命名 set
+
+两者互不影响：**写草稿绝不会改动 `capture_sets.json`**（已保存的 set 不会被未保存的编辑覆盖）。
+
+**GET /api/capture/draft** — 读取草稿；无草稿时 `phases` 为空数组：
+
+```json
+{ "ok": true, "data": {
+  "phases": [
+    { "type": "bias", "count": 50, "exposure_us": 30, "note": "bias frame" },
+    { "type": "light", "count": 100, "exposure_us": null, "note": null }
+  ],
+  "updated_at": "2026-11-03T12:00:00"
+}, "error": null }
+```
+
+**PUT /api/capture/draft** — body `{ "phases": [ ... ] }`（允许空数组）：
+
+- 校验规则与 `POST /api/capture/plan` 一致：`type` ∈ `bias|dark|flat|light`、`count` 1–10000、
+  `exposure_us` 允许 `null`；非法相位返回 400
+- 每项形如 `{type, count, exposure_us, note}`：`note` 为字符串或 `null`，会写进该相位每帧的
+  FITS `COMMENT`，因此刷新后必须从草稿恢复；草稿不含 `session_name`
+- 返回写入后的 `{phases, updated_at}`；草稿文件结构同上
+
+**GET /api/capture/sets** — 已保存 set 的名称列表，按名称排序：
+
+```json
+{ "ok": true, "data": { "names": ["LEED_A", "LEED_B"] }, "error": null }
+```
+
+**GET /api/capture/set?name=&lt;name&gt;** — 返回 `{name, phases, updated_at}`：
+
+- 名称走**查询参数**而非路径段，因此 `a/b`、`LEED a&b 100%` 这类名字可原样保存/读取/删除
+- 不存在返回 404；`name` 去首尾空白后为空返回 400
+
+**PUT /api/capture/set?name=&lt;name&gt;** — 新建或覆盖，body `{ "phases": [ ... ] }`：
+
+- 校验规则同草稿（`type`/`count`/`exposure_us`），但 **set 不保存 `note`**：即使请求里带
+  `note` 也会被丢弃，落盘键集严格是 `{type, count, exposure_us}`
+- `name` 去首尾空白后为空返回 400
+- 重名即覆盖原 set（不产生重复条目），返回 `{name, phases, updated_at}`
+
+**DELETE /api/capture/set?name=&lt;name&gt;** — 删除；返回 `{ "name": "...", "deleted": true }`；不存在返回 404。
+
+`<data_root>/capture_sets.json` 结构：
+
+```json
+{ "sets": {
+  "LEED_A": { "phases": [ ... ], "updated_at": "2026-11-03T12:00:00" }
+} }
+```
+
+- 每个 set 条目严格只有 `phases` 与 `updated_at`；每个相位严格只有 `type`/`count`/`exposure_us`
+- 草稿与命名 set 都是独立的 JSON 文件，后端重启后读盘即恢复
+
+**损坏文件不会被静默当成空状态，也不会被覆盖**：
+
+- 文件非法 JSON、顶层不是对象、`sets` 结构非法或 `phases` 不是数组时，相关接口返回 500，
+  `error` 消息里带文件名（如 `capture_sets.json has an invalid sets object`）
+- 文件保持字节不变：`GET` 不会重建它，`PUT` 也会先读取校验再写，因此一次“保存空表”不会覆盖损坏的 set 或草稿
+- 写草稿仍然绝不触碰 `capture_sets.json`（损坏判定也一样：草稿报错不会改动 set 文件）
+- 修复方式：把文件改回合法 JSON 或删除它，接口立即恢复；文件不存在仍是正常空状态
+  （`GET` 不创建文件，首次 `PUT` 才写）
+
+Capture 页前端行为：
+
+- 进入页面先 `GET /api/capture/draft`：`phases` 非空则填入相位表（含 `note`），否则使用内置默认模板
+- 相位表任何改动后 500ms 防抖 `PUT /api/capture/draft`（草稿带 `note`）
+- 草稿读取或写入失败（包括后端因文件损坏返回 500）时页面会弹出错误提示并附后端 `error` 文案，
+  不会静默回退默认模板、也不会静默丢弃编辑；轮询类请求（`/api/capture/state`、`/api/sessions`）仍保持静默
+- 命名 set 下拉（选中即加载到相位表；清空下拉不发请求）+ `Save As…` / `Overwrite` / `Delete` 三个操作；
+  重名另存、覆写、删除各自弹一次确认
+- capture state 为 `running|waiting_user|capturing` 时：set 操作、相位表四个行内编辑器
+  （`type` / `count` / `exposure_us` / `note`）、`Add Phase` 与「填入默认模板」按钮全部禁用
+
+### 2.7 Session 与文件
 
 **GET /api/sessions**
 
@@ -417,7 +498,7 @@ query：`?path=<绝对路径，可空>`
   （v1.4 绝对 folder 口径）解析，均必须在 `data_root` 内，穿越/越界返回 400
 - 响应头固定带 `Cache-Control: no-store`。
 
-### 2.7 数据处理
+### 2.8 数据处理
 
 拍摄状态为 `running|waiting_user|capturing` 时提交任何处理任务返回 **409**。
 
@@ -469,7 +550,7 @@ query：`?path=<绝对路径，可空>`
   "status": "running", "progress": 40, "message": "..." } }
 ```
 
-### 2.8 原生文件夹选择（v1.5）
+### 2.9 原生文件夹选择（v1.5）
 
 **POST /api/pick-folder** — 在服务器本机打开原生目录选择对话框（同步 `def`，由 FastAPI 线程池执行，不阻塞事件循环）。
 
@@ -520,6 +601,8 @@ HTTP 状态为 **501**。
   snapshots/<folder>/<ts>.{fits,tiff,png}              # v1.3 相对名兼容 / snapshots 内绝对目录
   <任意子目录>/<prefix>_<ts>.{fits,tiff,png}            # v1.4：data_root 内绝对 folder（prefix 非空时）
   <任意子目录>/<ts>.{fits,tiff,png}                     # v1.4：无 prefix
+  capture_draft.json                                  # 相位表草稿（未保存的编辑）
+  capture_sets.json                                   # 命名 set（用户显式保存）
   captures/<effective_session_name>/
     meta.json            # {id, name, created, phases[], camera{...}}；name 为 effective session name
     bias/  BIAS_0001.fits ...  + thumbs/BIAS_0001.png

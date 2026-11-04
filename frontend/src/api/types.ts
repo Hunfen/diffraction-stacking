@@ -1,4 +1,4 @@
-/** API 契约类型定义 — 与 docs/api.md v1.4 保持一致 */
+/** API contract types — kept in sync with docs/api.md v1.4 */
 
 export type PhaseType = 'bias' | 'dark' | 'flat' | 'light';
 
@@ -42,11 +42,11 @@ export interface CameraProperty {
   readonly: boolean;
   type: 'int' | 'float' | 'bool' | 'enum' | 'string' | 'command';
   options?: string[];
-  /** 相机属性被采集/自动控制锁定时为 true，锁定时不可写 */
+  /** True when acquisition or automatic control locks the camera property; locked means not writable */
   locked?: boolean;
-  /** 当前是否可用（false 时控件禁用）；缺省视为可用 */
+  /** Whether the property is currently available (controls are disabled on false); missing means available */
   available?: boolean;
-  /** IC4/GenICam visibility（UI 建议值，如 Beginner/Expert/Guru/Invisible，与可写无关） */
+  /** IC4/GenICam visibility (a UI hint such as Beginner/Expert/Guru/Invisible, unrelated to writability) */
   visibility?: string;
 }
 
@@ -60,7 +60,7 @@ export interface PropertyPutResult {
   actual: number | boolean;
 }
 
-/** PUT /api/properties/{name} 的扩展返回（Parameters 页用于 enum/string/command 等） */
+/** Extended response of PUT /api/properties/{name} (the Parameters page uses it for enum/string/command) */
 export interface PropertySetResult {
   name: string;
   value: number | boolean | string | null;
@@ -80,11 +80,11 @@ export interface LiveState {
   quality?: number;
 }
 
-/** v1.3 遗留端点 GET /api/snapshot/folders 的子目录项（v1.4 前端不再使用） */
+/** Subdirectory item of the legacy v1.3 GET /api/snapshot/folders (unused by the v1.4 frontend) */
 export interface SnapshotFolder {
-  /** 子目录名；根目录用空字符串表示 */
+  /** Subdirectory name; the root directory is an empty string */
   name: string;
-  /** 该文件夹内的文件数 */
+  /** Number of files in that folder */
   files: number;
 }
 
@@ -92,25 +92,25 @@ export interface SnapshotFoldersData {
   folders: SnapshotFolder[];
 }
 
-/** GET /api/browse/folders 返回的单个直接子目录 */
+/** One direct subdirectory returned by GET /api/browse/folders */
 export interface BrowseFolderItem {
   name: string;
-  /** 子目录绝对路径（用于作为下一次 browse 的 path 参数） */
+  /** Absolute path of the subdirectory (used as the path argument of the next browse call) */
   path: string;
 }
 
-/** GET /api/browse/folders 返回数据：当前目录、上一级目录与直接子目录列表 */
+/** GET /api/browse/folders payload: current directory, parent directory and direct subdirectories */
 export interface BrowseFoldersData {
-  /** 当前目录绝对路径 */
+  /** Absolute path of the current directory */
   path: string;
-  /** 上一级目录绝对路径；已在 data_root 顶层时为 null */
+  /** Absolute path of the parent directory; null at the data_root top level */
   parent: string | null;
-  /** v1.4 恒为空数组（目录浏览器不列文件） */
+  /** Always an empty array in v1.4 (the directory browser lists no files) */
   files: string[];
   folders: BrowseFolderItem[];
 }
 
-/** v1.4：folder 为实际保存目录的绝对路径；prefix 为后端 sanitize 后的前缀（可为空字符串） */
+/** v1.4: folder is the absolute path actually saved to; prefix is the backend-sanitized prefix (may be empty) */
 export interface SnapshotResult {
   file: string;
   url: string;
@@ -139,9 +139,36 @@ export interface CapturePhasePlan {
 
 export interface CapturePlanResult {
   plan_id: string;
-  /** v1.2：带时间戳前缀的最终 session 名（后端计算并写入响应，所有后续展示以该值为准） */
+  /** v1.2: final session name with the timestamp prefix (computed by the backend; every later display uses it) */
   session_name: string;
   phases: CapturePhasePlan[];
+}
+
+/** Phase stored in a named set (exposure and count only, no note) */
+export interface CapturePhaseStored {
+  type: PhaseType;
+  count: number;
+  exposure_us: number | null;
+}
+
+/** Draft phase additionally keeps note: it goes into every frame's FITS COMMENT and must survive a refresh */
+export interface CaptureDraftPhase extends CapturePhaseStored {
+  note: string | null;
+}
+
+export interface CaptureDraft {
+  phases: CaptureDraftPhase[];
+  updated_at: string | null;
+}
+
+export interface CaptureSetNames {
+  names: string[];
+}
+
+export interface CaptureSet {
+  name: string;
+  phases: CapturePhaseStored[];
+  updated_at: string | null;
 }
 
 export interface DataDirSettings {
@@ -149,7 +176,7 @@ export interface DataDirSettings {
   writable: boolean;
 }
 
-/** POST /api/pick-folder 原生目录选择器响应；path 为 null 表示用户取消 */
+/** Response of the POST /api/pick-folder native picker; path null means the user cancelled */
 export interface PickFolderResult {
   path: string | null;
 }
@@ -180,14 +207,14 @@ export interface CaptureState {
   current_phase?: CurrentPhaseInfo;
   frames_done: number;
   total_frames: number;
-  /** v1.1：true = 必须人工确认（阻塞 Modal）；false = 自动准备中（非阻塞 Banner） */
+  /** v1.1: true = manual confirmation required (blocking Modal); false = preparing automatically (non-blocking banner) */
   needs_user?: boolean;
   prompt?: string;
   message?: string;
   log?: CaptureLogEntry[];
 }
 
-/** calibrate/stack 请求体 exclude：未勾选帧文件名按相位分组 */
+/** calibrate/stack request exclude: unchecked frame filenames grouped by phase */
 export type ExcludeMap = Record<PhaseType, string[]>;
 
 export interface CaptureEvent {
@@ -226,7 +253,7 @@ export interface SessionDetail {
   frames: Partial<Record<PhaseType, FrameInfo[]>>;
   results: ResultInfo[];
   qc?: Record<string, unknown>;
-  /** v1.5：持久化产物标记，用于处理步骤门控在刷新/切换会话后仍正确 */
+  /** v1.5: persisted artifact marker so step gating stays correct after a refresh or session switch */
   has_masters?: boolean;
   has_calibrated?: boolean;
 }
@@ -240,23 +267,23 @@ export interface JobResult {
   result: unknown;
 }
 
-/** POST /api/process/{calibrate|stack|stretch} 提交响应（字段名为 job_id，与 WS/GET 的 id 不同） */
+/** Response of POST /api/process/{calibrate|stack|stretch} (field is job_id, unlike the id used by WS/GET) */
 export interface JobSubmitResult {
   job_id: string;
   type: 'calibrate' | 'stack' | 'stretch';
   status: 'pending' | 'running' | 'done' | 'error';
-  /** v1.5：提交所属会话；旧后端可能缺省，前端可用当前 selectedId 兜底 */
+  /** v1.5: session that submitted the job; old backends may omit it and the frontend can fall back to selectedId */
   session_id?: string;
 }
 
-/** WS /ws/events 与 GET /api/process/jobs/{id} 返回的 job 负载（字段名为 id） */
+/** Job payload from WS /ws/events and GET /api/process/jobs/{id} (field is id) */
 export interface JobEventData {
   id: string;
   type: 'calibrate' | 'stack' | 'stretch';
   status: 'pending' | 'running' | 'done' | 'error';
   progress?: number;
   message?: string;
-  /** v1.5：任务所属会话，用于按会话门控与避免跨会话刷新 */
+  /** v1.5: session owning the job, used for per-session gating and to avoid cross-session refreshes */
   session_id?: string;
 }
 

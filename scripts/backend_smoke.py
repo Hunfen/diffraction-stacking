@@ -7,6 +7,7 @@ Exit code: 0 = all passed; 1 = some checks failed.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import http.client
 import json
 import os
@@ -120,6 +121,43 @@ def wait_server(timeout=40):
             raise RuntimeError(f"uvicorn exited early (code={PROC.returncode}):\n{out}")
         time.sleep(0.3)
     raise RuntimeError(f"Server not ready within {timeout}s: {last}")
+
+
+def stop_server() -> None:
+    """Stop the uvicorn subprocess (used by the restart-persistence check)."""
+    global PROC
+    if PROC is None:
+        return
+    PROC.terminate()
+    try:
+        PROC.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        PROC.kill()
+        PROC.wait(timeout=5)
+    if PROC.stdout:
+        PROC.stdout.close()
+    PROC = None
+
+
+def start_server(extra_env=None) -> None:
+    """Start uvicorn against DATA_ROOT and wait until /api/health answers."""
+    global PROC
+    env = dict(os.environ) if extra_env is None else dict(extra_env)
+    env["DIFF_DATA_ROOT"] = str(DATA_ROOT)
+    PROC = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app.main:app",
+         "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
+        cwd=BACKEND, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    wait_server()
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def set_url(name: str) -> str:
+    """Single-set endpoint: the name is a query parameter, so '/' survives."""
+    return "/api/capture/set?name=" + quote(name, safe="")
 
 
 def poll_state(cond, timeout=60, interval=0.1):
@@ -308,7 +346,7 @@ def step_settings():
 
 
 def step_browse_folders():
-    """v1.4: GET /api/browse/folders — 目录浏览（默认 data_root、子目录与 parent、越界 400）。"""
+    """v1.4: GET /api/browse/folders -- directory browsing (default data_root, subdirectories and parent, 400 when outside the root)."""
     root = DATA_ROOT
     browse_root = root / "smoke_browse"
     shutil.rmtree(browse_root, ignore_errors=True)
@@ -532,6 +570,8 @@ def step_live_snapshot():
                   "snapshot FRAMETYP == SNAPSHOT")
             check(snap_hdr.get("SESSION") == "SNAPSHOT" and snap_hdr.get("NFRAME") == 1,
                   "snapshot SESSION=SNAPSHOT, NFRAME=1")
+            check(snap_hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+                  "snapshot FITS header carries ORIENT='FITS-BOTTOM-UP'")
         except Exception as exc:  # noqa: BLE001
             check(False, f"snapshot FITS header validation failed: {exc}")
     status, snap_png = http_req("POST", "/api/snapshot", {"format": "png"})
@@ -560,7 +600,7 @@ def step_live_snapshot():
 
 
 def step_metadata_headers():
-    """v1.6: FITS 全量参数(HIERARCH CAM)+COMMENT；TIFF tag 270/305/65000。"""
+    """v1.6: full FITS parameters (HIERARCH CAM) + COMMENT; TIFF tags 270/305/65000."""
     # --- FITS snapshot with a Chinese comment ---
     status, snap = http_req("POST", "/api/snapshot",
                             {"format": "fits", "comment": "中文注释 first\nsecond"})
@@ -643,7 +683,7 @@ def step_metadata_headers():
 
 
 def step_snapshot_folders():
-    """v1.4: 绝对 folder + prefix + 文件名恒带时间戳；保留 v1.3 相对单段名与 folders 接口。"""
+    """v1.4: absolute folder + prefix + filenames always carrying a timestamp; keeps the v1.3 single-segment relative name and the folders endpoint."""
     snap_root = (DATA_ROOT / "snapshots").resolve()
     data_root = DATA_ROOT.resolve()
     ts_fits_re = r"^\d{8}T\d{2}-\d{2}-\d{2}\.fits$"
@@ -731,7 +771,7 @@ def step_snapshot_folders():
             f"/api/files/snapshots/{folder_name}/../{sub['file']}", safe="/"))
         check(status == 400, "snapshot subfolder traversal (<folder>/../<file>) -> 400")
 
-    # v1.4：data_root 下自选绝对目录（不存在时自动 mkdir parents）+ prefix="spot"。
+    # v1.4: any chosen absolute folder under data_root (mkdir parents when missing) + prefix="spot".
     abs_dir = data_root / "v14_smoke_abs" / "nested"
     shutil.rmtree(data_root / "v14_smoke_abs", ignore_errors=True)
     status, snap_abs = http_req("POST", "/api/snapshot",
@@ -793,7 +833,7 @@ def step_snapshot_folders():
               and (r or {}).get("error") == "Folder must be inside the data root",
               f"absolute folder outside data_root {bad_abs!r} -> 400")
 
-    # v1.4：folder == data_root 允许（文件落在 data_root 根目录）。
+    # v1.4: folder == data_root is allowed (files land in the data_root itself).
     status, snap_rootabs = http_req("POST", "/api/snapshot",
                                     {"format": "fits", "folder": str(data_root)})
     rootabs = snap_rootabs.get("data") if snap_rootabs.get("ok") else {}
@@ -1150,6 +1190,26 @@ def step_session_files():
               "FITS is 16-bit with data in the low 12 bits (max <= 4095)")
         check("." in str(hdr.get("DATE-OBS", "")),
               "DATE-OBS has millisecond precision (fractional seconds)")
+        check(hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+              "raw FITS header carries ORIENT='FITS-BOTTOM-UP'")
+        # Orientation proof through an independent artifact: the thumbnail PNG is rendered from the
+        # captured frame, so flipping the file data back must reproduce it exactly, while the raw
+        # (bottom-up) file order must not.
+        import sys as _sys
+        if str(BACKEND) not in _sys.path:
+            _sys.path.insert(0, str(BACKEND))
+        from PIL import Image
+        from app.util import auto_contrast_8bit
+
+        stem = str(f0["file"]).rsplit(".", 1)[0]
+        with Image.open(DATA_ROOT / "captures" / SESSION_ID / "bias"
+                        / "thumbs" / f"{stem}.png") as thumb_img:
+            thumb_px = np.asarray(thumb_img.convert("L"))
+        raw_px = np.asarray(data, dtype=np.uint16)
+        check(np.array_equal(auto_contrast_8bit(np.flipud(raw_px)), thumb_px),
+              "flipping the raw FITS back reproduces the captured frame (thumbnail match)")
+        check(not np.array_equal(auto_contrast_8bit(raw_px), thumb_px),
+              "raw FITS is stored bottom-up (the unflipped order does not match the frame)")
     except Exception as exc:  # noqa: BLE001
         check(False, f"FITS header validation failed: {exc}")
     status, body = raw_request(f0["thumb"])
@@ -1164,6 +1224,66 @@ def step_session_files():
     check(status == 400, "path traversal (bias/../meta.json) rejected with 400")
     status, body = raw_request(f"/api/files/../../etc/passwd")
     check(status in (400, 404), "invalid session_id rejected")
+
+
+def step_fits_orientation():
+    """Unit-level FITS I/O boundary: write bottom-up with ORIENT, read back only when marked."""
+    import sys as _sys
+    from types import SimpleNamespace
+
+    if str(BACKEND) not in _sys.path:
+        _sys.path.insert(0, str(BACKEND))
+    from astropy.io import fits
+    from app import capture as capture_mod
+    from app import fits_io
+
+    yy, xx = np.mgrid[0:24, 0:32]
+    pattern = ((yy * 7 + xx * 3) % 4096).astype(np.uint16)
+    tmp = Path(tempfile.mkdtemp(prefix="fits-orient-unit-"))
+    try:
+        marked = tmp / "marked.fits"
+        fits_io.write_fits(marked, pattern, [("NOTE", "unit")])
+        with fits.open(marked) as hdul:
+            on_disk = np.asarray(hdul[0].data)
+            marked_hdr = hdul[0].header
+        check(np.array_equal(on_disk, np.flipud(pattern)),
+              "fits_io: write_fits stores the array bottom-up (np.flipud)")
+        check(marked_hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+              "fits_io: write_fits records ORIENT='FITS-BOTTOM-UP'")
+        check(np.array_equal(fits_io.read_fits_data(marked), pattern),
+              "fits_io: read_fits_data flips a marked file back to sensor order")
+
+        legacy = tmp / "legacy.fits"
+        fits.PrimaryHDU(pattern).writeto(legacy, overwrite=True)
+        check(np.array_equal(fits_io.read_fits_data(legacy), pattern),
+              "fits_io: a legacy file without ORIENT is read unchanged")
+
+        other = tmp / "other.fits"
+        other_hdu = fits.PrimaryHDU(pattern)
+        other_hdu.header["ORIENT"] = "TOP-DOWN"
+        other_hdu.writeto(other, overwrite=True)
+        check(np.array_equal(fits_io.read_fits_data(other), pattern),
+              "fits_io: only the exact FITS-BOTTOM-UP marker triggers a flip")
+
+        # The capture writer must use the same boundary: file = flipud(frame), reader = frame.
+        svc = capture_mod.CaptureService(None)
+        svc._session_id = "ORIENT_UNIT"
+        raw_path = tmp / "raw_frame.fits"
+        svc._save_fits(raw_path, pattern, capture_mod.frame_stats(pattern), "light",
+                       1000.0, 0.0, 0.0, 20.0,
+                       SimpleNamespace(name="mock", serial="000"), 1,
+                       props={}, comment="orientation unit")
+        with fits.open(raw_path) as hdul:
+            raw_on_disk = np.asarray(hdul[0].data)
+            raw_hdr = hdul[0].header
+        check(np.array_equal(np.flipud(raw_on_disk), pattern),
+              "raw _save_fits: np.flipud(disk data) equals the captured frame")
+        check(raw_hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+              "raw _save_fits records ORIENT='FITS-BOTTOM-UP'")
+        check(np.array_equal(fits_io.read_fits_data(raw_path), pattern),
+              "raw _save_fits: read_fits_data returns the captured frame")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def step_processing():
@@ -1244,6 +1364,25 @@ def step_processing():
     except Exception as exc:  # noqa: BLE001
         check(False, f"STACK precision validation failed: {exc}")
 
+    # Every processing output is written bottom-up and marked; the PNG preview follows the in-memory
+    # (sensor order) result, so it must stay equal to the high 8 bits of the stretched frame.
+    import sys as _sys
+    if str(BACKEND) not in _sys.path:
+        _sys.path.insert(0, str(BACKEND))
+    from PIL import Image
+    from app import fits_io
+
+    sess_dir = DATA_ROOT / "captures" / SESSION_ID
+    for rel in ("masters/MASTER_BIAS.fits", "masters/MASTER_DARK.fits",
+                "masters/MASTER_FLAT.fits", "calibrated/CAL_0001.fits",
+                "results/STACK_sigma3.fits"):
+        try:
+            _, out_hdr = fits_io.read_fits(sess_dir / rel)
+            check(out_hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+                  f"{rel} carries ORIENT='FITS-BOTTOM-UP'")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"{rel} ORIENT validation failed: {exc}")
+
     _, r = http_req("POST", "/api/process/stretch",
                     {"session_id": SESSION_ID, "result_file": "STACK_sigma3.fits",
                      "stretch": "asinh", "black": 0, "white": 4095})
@@ -1258,6 +1397,18 @@ def step_processing():
     if sres.get("url"):
         status, body = raw_request(sres["url"])
         check(status == 200 and body[:6] == b"SIMPLE", "stretched result FITS downloadable")
+        stretched_path = sess_dir / "results" / sres["file"]
+        try:
+            _, str_hdr = fits_io.read_fits(stretched_path)
+            check(str_hdr.get("ORIENT") == "FITS-BOTTOM-UP",
+                  "stretched FITS carries ORIENT='FITS-BOTTOM-UP'")
+            stretched = np.asarray(fits_io.read_fits_data(stretched_path))
+            with Image.open(sess_dir / "results" / "STACK_preview.png") as prev_img:
+                preview_px = np.asarray(prev_img.convert("L"))
+            check(np.array_equal((stretched >> 8).astype(np.uint8), preview_px),
+                  "STACK_preview.png still equals the high 8 bits of the stretched result")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"stretched FITS orientation validation failed: {exc}")
 
     # P1 regression: re-running calibrate with a different exclude must clear old
     # calibrated/*.fits so _run_stack cannot consume stale CAL files.
@@ -1380,6 +1531,209 @@ def step_pick_folder_unit():
                   "osascript unit: error stderr raises RuntimeError")
 
 
+def step_capture_persistence():
+    """Capture draft + named sets: exactly the persistence contract of the Capture page."""
+    draft_path = DATA_ROOT / "capture_draft.json"
+    sets_path = DATA_ROOT / "capture_sets.json"
+
+    # 1) No draft yet: the API reports empty phases and no file is created.
+    status, payload = http_req("GET", "/api/capture/draft", expect=200)
+    draft_data = payload.get("data") or {}
+    check(status == 200 and draft_data.get("phases") == [],
+          "capture draft: empty phases before the first save")
+    check(not draft_path.exists(), "capture draft: no file until the first save")
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == [],
+          "capture sets: no names before the first save")
+
+    # 2) Draft round trip including note, on-disk layout and updated_at.
+    draft_phases = [
+        {"type": "bias", "count": 7, "exposure_us": 12.5, "note": "bias frame"},
+        {"type": "dark", "count": 3, "exposure_us": None, "note": None},
+        {"type": "light", "count": 11, "exposure_us": None, "note": "same exposure as dark"},
+    ]
+    http_req("PUT", "/api/capture/draft", {"phases": draft_phases}, expect=200)
+    check(draft_path.is_file(), f"capture draft: written to {draft_path}")
+    on_disk = json.loads(draft_path.read_text(encoding="utf-8"))
+    check(on_disk.get("phases") == draft_phases,
+          "capture draft: file holds type/count/exposure_us/note for every phase")
+    check(isinstance(on_disk.get("updated_at"), str) and bool(on_disk["updated_at"]),
+          "capture draft: file records updated_at")
+    _, payload = http_req("GET", "/api/capture/draft", expect=200)
+    check((payload.get("data") or {}).get("phases") == draft_phases,
+          "capture draft: GET returns the last written phases including note")
+
+    # 3) Draft validation matches plan(): PHASE_TYPES, count >= 1, exposure nullable.
+    http_req("PUT", "/api/capture/draft",
+             {"phases": [{"type": "bogus", "count": 1, "exposure_us": None}]}, expect=400)
+    http_req("PUT", "/api/capture/draft",
+             {"phases": [{"type": "light", "count": 0, "exposure_us": None}]}, expect=400)
+
+    # 4) Named set: create, sorted list, read back. Sets never keep the note.
+    set_a = [{"type": "bias", "count": 4, "exposure_us": 20.0},
+             {"type": "light", "count": 9, "exposure_us": None}]
+    set_a_body = [dict(set_a[0], note="sets must not keep this"), set_a[1]]
+    _, payload = http_req("PUT", set_url("smoke_set_a"),
+                          {"phases": set_a_body}, expect=200)
+    check((payload.get("data") or {}).get("phases") == set_a,
+          "capture set: PUT stores type/count/exposure_us and drops note")
+    http_req("PUT", set_url("smoke_set_b"),
+             {"phases": [{"type": "flat", "count": 2, "exposure_us": None}]}, expect=200)
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == ["smoke_set_a", "smoke_set_b"],
+          "capture set: names are sorted")
+    _, payload = http_req("GET", set_url("smoke_set_a"), expect=200)
+    check((payload.get("data") or {}).get("phases") == set_a,
+          "capture set: GET returns the saved phases")
+    check(sets_path.is_file(), f"capture sets: written to {sets_path}")
+    stored = json.loads(sets_path.read_text(encoding="utf-8"))
+    check(sorted(stored.get("sets", {})) == ["smoke_set_a", "smoke_set_b"],
+          "capture sets: file is a {sets: {name: {phases, updated_at}}} map")
+    entry_a = stored.get("sets", {}).get("smoke_set_a", {})
+    check(sorted(entry_a) == ["phases", "updated_at"],
+          "capture sets: each entry keeps exactly phases + updated_at")
+    check(all(sorted(p) == ["count", "exposure_us", "type"] for p in entry_a.get("phases", [])),
+          "capture sets: set phases keep exactly type/count/exposure_us")
+
+    # 5) Overwrite keeps one entry and replaces the phases.
+    overwritten = [{"type": "dark", "count": 5, "exposure_us": 33.0}]
+    http_req("PUT", set_url("smoke_set_a"), {"phases": overwritten}, expect=200)
+    _, payload = http_req("GET", set_url("smoke_set_a"), expect=200)
+    check((payload.get("data") or {}).get("phases") == overwritten,
+          "capture set: PUT overwrites an existing set")
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == ["smoke_set_a", "smoke_set_b"],
+          "capture set: overwrite does not duplicate the name")
+
+    # 6) Missing set 404, blank name 400.
+    http_req("GET", set_url("no_such_set"), expect=404)
+    http_req("PUT", set_url("   "), {"phases": set_a}, expect=400)
+    http_req("DELETE", set_url("no_such_set"), expect=404)
+
+    # 7) Names with "/" and other URL-special characters travel as a query
+    #    parameter, so they can be saved, read back and deleted unchanged.
+    slash_name = "a/b"
+    special_name = "LEED a&b 100%"
+    http_req("PUT", set_url(slash_name), {"phases": set_a}, expect=200)
+    http_req("PUT", set_url(special_name), {"phases": set_a}, expect=200)
+    _, payload = http_req("GET", set_url(slash_name), expect=200)
+    check((payload.get("data") or {}).get("name") == slash_name
+          and (payload.get("data") or {}).get("phases") == set_a,
+          "capture set: a 'a/b' name is saved and read back verbatim")
+    _, payload = http_req("GET", set_url(special_name), expect=200)
+    check((payload.get("data") or {}).get("name") == special_name,
+          "capture set: a name with '&' and '%' is read back verbatim")
+    stored = json.loads(sets_path.read_text(encoding="utf-8"))
+    check(slash_name in stored.get("sets", {}) and special_name in stored.get("sets", {}),
+          "capture sets: special names are stored verbatim as JSON keys")
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names")
+          == sorted(["smoke_set_a", "smoke_set_b", slash_name, special_name]),
+          "capture sets: special names show up sorted in the list")
+
+    # 8) Negative control: saving the draft must not touch capture_sets.json.
+    before = sha256_file(sets_path)
+    final_draft = [{"type": "light", "count": 2, "exposure_us": None, "note": "final"}]
+    http_req("PUT", "/api/capture/draft", {"phases": final_draft}, expect=200)
+    after = sha256_file(sets_path)
+    check(before == after,
+          "capture draft: writing the draft leaves capture_sets.json byte-identical "
+          f"({before[:12]} == {after[:12]})")
+
+    # 9) Delete, including the slash name.
+    http_req("DELETE", set_url("smoke_set_b"), expect=200)
+    http_req("GET", set_url("smoke_set_b"), expect=404)
+    http_req("DELETE", set_url(slash_name), expect=200)
+    http_req("GET", set_url(slash_name), expect=404)
+    http_req("DELETE", set_url(special_name), expect=200)
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == ["smoke_set_a"],
+          "capture set: DELETE removes sets, including a 'a/b' name")
+
+    # 10) Both files survive a backend restart (draft + named set).
+    stop_server()
+    start_server()
+    _, payload = http_req("GET", "/api/capture/draft", expect=200)
+    check((payload.get("data") or {}).get("phases") == final_draft,
+          "capture draft: phases (with note) survive a backend restart")
+    _, payload = http_req("GET", set_url("smoke_set_a"), expect=200)
+    check((payload.get("data") or {}).get("phases") == overwritten,
+          "capture set: saved phases survive a backend restart")
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == ["smoke_set_a"],
+          "capture set: names survive a backend restart")
+
+    # 11) A damaged capture_sets.json is reported, never silently replaced.
+    #     The pre-fix reader turned unparsable bytes into an empty store, so the
+    #     next PUT wrote a fresh file over the user's data.
+    def legacy_read(path: Path) -> dict:
+        """Pre-fix reader: any parse or shape problem became an empty store."""
+        try:
+            if not path.is_file():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    sets_backup = sets_path.read_bytes()
+    sets_path.write_text("{ this is not json", encoding="utf-8")
+    damaged_sets_sha = sha256_file(sets_path)
+    status, payload = http_req("GET", "/api/capture/sets")
+    body = json.dumps(payload, ensure_ascii=False)
+    check(status >= 500 and "capture_sets.json" in body,
+          f"capture sets: a damaged file fails explicitly (status {status}, names the file)")
+    status_put, payload_put = http_req("PUT", set_url("damaged_probe"), {"phases": set_a})
+    body_put = json.dumps(payload_put, ensure_ascii=False)
+    check(status_put >= 500 and "capture_sets.json" in body_put,
+          f"capture sets: PUT refuses to overwrite a damaged file (status {status_put})")
+    check(sha256_file(sets_path) == damaged_sets_sha,
+          "capture sets: the damaged file stays byte-identical after GET and PUT")
+    check(legacy_read(sets_path) == {} and status >= 500,
+          "negative control: the old reader hid the damage, the API now reports it")
+
+    # 12) Same for a damaged capture_draft.json, and it must not touch the sets.
+    draft_backup = draft_path.read_bytes()
+    sets_sha = sha256_file(sets_path)
+    draft_path.write_text("[1, 2, 3]", encoding="utf-8")  # valid JSON, wrong shape
+    damaged_draft_sha = sha256_file(draft_path)
+    status, payload = http_req("GET", "/api/capture/draft")
+    body = json.dumps(payload, ensure_ascii=False)
+    check(status >= 500 and "capture_draft.json" in body,
+          f"capture draft: a damaged file fails explicitly (status {status}, names the file)")
+    status_put, payload_put = http_req("PUT", "/api/capture/draft", {"phases": final_draft})
+    body_put = json.dumps(payload_put, ensure_ascii=False)
+    check(status_put >= 500 and "capture_draft.json" in body_put,
+          f"capture draft: PUT refuses to overwrite a damaged file (status {status_put})")
+    check(sha256_file(draft_path) == damaged_draft_sha,
+          "capture draft: the damaged file stays byte-identical after GET and PUT")
+    check(sha256_file(sets_path) == sets_sha,
+          "capture draft: reporting a damaged draft does not touch capture_sets.json")
+
+    # 13) Replace the damaged bytes with valid JSON: the same endpoints recover,
+    #     so the error only fires on damage and never blocks forever.
+    sets_path.write_bytes(sets_backup)
+    draft_path.write_bytes(draft_backup)
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == ["smoke_set_a"],
+          "capture sets: valid JSON after repair is served again")
+    _, payload = http_req("GET", "/api/capture/draft", expect=200)
+    check((payload.get("data") or {}).get("phases") == final_draft,
+          "capture draft: valid JSON after repair is served again")
+
+    # 14) Missing files remain a normal empty first-run state and stay missing.
+    draft_path.unlink()
+    sets_path.unlink()
+    _, payload = http_req("GET", "/api/capture/draft", expect=200)
+    check((payload.get("data") or {}).get("phases") == [] and not draft_path.exists(),
+          "capture draft: a missing file is an empty draft and is not created by GET")
+    _, payload = http_req("GET", "/api/capture/sets", expect=200)
+    check((payload.get("data") or {}).get("names") == [] and not sets_path.exists(),
+          "capture sets: a missing file is an empty list and is not created by GET")
+    http_req("PUT", "/api/capture/draft", {"phases": final_draft}, expect=200)
+    check(draft_path.is_file(), "capture draft: the first PUT creates the file again")
+
+
 def main():
     global BASE, PORT, PROC, DATA_ROOT
     PORT = free_port()
@@ -1400,11 +1754,7 @@ def main():
     PROC = None
     try:
         step_pick_folder_unit()
-        PROC = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "app.main:app",
-             "--host", "127.0.0.1", "--port", str(PORT), "--log-level", "warning"],
-            cwd=BACKEND, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        wait_server()
+        start_server(env)
         step_health_devices()
         step_open_properties()
         step_settings()
@@ -1418,6 +1768,7 @@ def main():
         step_capture_dir_error()
         step_p3_regressions()
         step_session_files()
+        step_fits_orientation()
         step_processing()
         step_live_error()
 
@@ -1426,17 +1777,16 @@ def main():
               "device close succeeds at end of smoke")
         _, r = http_req("GET", "/api/capture/state")
         check(r["data"]["status"] == "finished", "final: state still queryable after device close")
+
+        # Last step on purpose: it restarts the backend to prove the draft and
+        # the named sets are read back from disk.
+        step_capture_persistence()
     except Exception as exc:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         check(False, f"self test exception: {exc}")
     finally:
-        if PROC is not None:
-            PROC.terminate()
-            try:
-                PROC.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                PROC.kill()
+        stop_server()
         # Restore the user's persisted data-root setting exactly as it was.
         try:
             if original_settings is None:

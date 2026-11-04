@@ -1,3 +1,3 @@
-"""Diffraction Stacking 后端（FastAPI）。"""
+"""Diffraction Stacking backend (FastAPI)."""
 
 APP_VERSION = "1.6.0"
