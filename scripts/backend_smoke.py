@@ -1441,6 +1441,199 @@ def step_processing():
           "session detail returns qc_report (frames=2, includes excluded_counts)")
 
 
+def step_camera_props():
+    """v1.7: the capture-start camera snapshot is written once and referenced from every FITS header."""
+    import inspect
+
+    from astropy.io import fits
+
+    sess_dir = DATA_ROOT / "captures" / SESSION_ID
+    props_path = sess_dir / "camera_props.json"
+    check(props_path.is_file(), "session root holds camera_props.json")
+    payload = {}
+    try:
+        payload = json.loads(props_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"camera_props.json is valid JSON ({exc})")
+    check(set(payload) == {"generated_at", "device", "session", "props"},
+          f"camera_props.json has exactly generated_at/device/session/props "
+          f"(got {sorted(payload)})")
+    device = payload.get("device") or {}
+    check(all(device.get(key) for key in ("id", "name", "serial", "kind")),
+          f"camera_props device carries id/name/serial/kind (got {device})")
+    check(payload.get("session") == SESSION_ID,
+          "camera_props session matches the capture session")
+    props = payload.get("props")
+    check(isinstance(props, dict) and len(props) >= 12,
+          f"camera_props props is a flat mapping "
+          f"({len(props) if isinstance(props, dict) else 0} entries)")
+    check(isinstance(props, dict) and all(not isinstance(v, dict)
+                                         for v in props.values()),
+          "camera_props props stores plain values (no per-property dicts)")
+    check(re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$",
+                   str(payload.get("generated_at") or "")) is not None,
+          f"camera_props generated_at is an ISO timestamp "
+          f"(got {payload.get('generated_at')!r})")
+
+    # Every raw frame points at the session snapshot; the 12 HIERARCH CAM cards (mock camera)
+    # stay untouched. A real ic4 camera produces 9 of them (the three mock_* properties are absent).
+    for group in ("bias", "dark", "flat", "light"):
+        files = sorted((sess_dir / group).glob("*.fits"))
+        if not files:
+            check(False, f"{group}/ has no raw frame to validate")
+            continue
+        with fits.open(files[0]) as hdul:
+            raw_hdr = hdul[0].header
+        check(raw_hdr.get("CAMPARS") == "camera_props.json",
+              f"{group} raw frame CAMPARS == 'camera_props.json'")
+        cam_cards = [key for key in raw_hdr if key.startswith("CAM ")]
+        check("HIERARCH CAM WIDTH" in raw_hdr and len(cam_cards) == 12,
+              f"{group} raw frame keeps the 12 HIERARCH CAM cards (got {len(cam_cards)})")
+
+    # Snapshot FITS: CAMPARS points at the snapshot folder copy of the snapshot.
+    status, snap = http_req("POST", "/api/snapshot", {"format": "fits"})
+    check(status == 200 and snap.get("ok"), "snapshot FITS succeeds (camera_props step)")
+    if snap.get("ok"):
+        snap_props = DATA_ROOT / "snapshots" / "camera_props.json"
+        check(snap_props.is_file(), "snapshots/ holds camera_props.json for snapshots")
+        try:
+            snap_payload = json.loads(snap_props.read_text(encoding="utf-8"))
+            check(isinstance(snap_payload.get("props"), dict)
+                  and len(snap_payload["props"]) >= 12,
+                  "snapshots/camera_props.json stores the full property mapping")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"snapshots/camera_props.json is valid JSON ({exc})")
+        with fits.open(DATA_ROOT / "snapshots" / snap["data"]["file"]) as hdul:
+            snap_hdr = hdul[0].header
+        check(snap_hdr.get("CAMPARS") == "camera_props.json",
+              "snapshot FITS CAMPARS points at camera_props.json")
+
+    # Calibrated frame: full acquisition settings + camera identity + pointer.
+    cal_files = sorted((sess_dir / "calibrated").glob("*.fits"))
+    check(bool(cal_files), "calibrated/ holds frames for the CAMPARS validation")
+    if cal_files:
+        with fits.open(cal_files[0]) as hdul:
+            cal_hdr = hdul[0].header
+        for key in ("EXPOSURE", "GAIN", "BLACKLEV", "TEMP", "WIDTH", "HEIGHT",
+                    "OFFSETX", "OFFSETY", "REVERSX", "REVERSY", "CAMERA",
+                    "SERIAL", "CAMPARS"):
+            check(key in cal_hdr, f"calibrated frame header contains {key}")
+        check(cal_hdr.get("CAMPARS") == "camera_props.json",
+              "calibrated frame CAMPARS points at camera_props.json")
+
+    # Masters only carry the temperature range, camera identity and the pointer.
+    with fits.open(sess_dir / "masters" / "MASTER_DARK.fits") as hdul:
+        master_hdr = hdul[0].header
+    for key in ("TEMP_MED", "TEMP_MIN", "TEMP_MAX", "CAMERA", "SERIAL", "CAMPARS"):
+        check(key in master_hdr, f"master dark header contains {key}")
+    check("EXPOSURE" not in master_hdr,
+          "master dark header stays minimal (no EXPOSURE card)")
+
+    # STACK: medians of the contributing frames, temperature range, ROI, and combine counters.
+    stack_hdr = fits.getheader(sess_dir / "results" / "STACK_sigma3.fits")
+    for key in ("EXPOSURE", "GAIN", "BLACKLEV", "TEMP_MED", "TEMP_MIN", "TEMP_MAX",
+                "WIDTH", "HEIGHT", "OFFSETX", "OFFSETY", "REVERSX", "REVERSY",
+                "CAMERA", "SERIAL", "NCOMBINE", "NREJECT", "CAMPARS",
+                "SIGMA", "METHOD", "REGIS"):
+        check(key in stack_hdr, f"STACK header contains {key}")
+    check(stack_hdr.get("CAMPARS") == "camera_props.json",
+          "STACK CAMPARS points at camera_props.json")
+    check(stack_hdr.get("NCOMBINE") == 2 and stack_hdr.get("NREJECT") == 1,
+          f"STACK NCOMBINE=2 / NREJECT=1 (got {stack_hdr.get('NCOMBINE')!r} / "
+          f"{stack_hdr.get('NREJECT')!r})")
+    check("MIXED" not in stack_hdr,
+          "uniform settings leave MIXED unset on the STACK header")
+
+    # Stretched product inherits the cards of the stack it was made from.
+    stretch_files = sorted((sess_dir / "results").glob("STACK_sigma3_*.fits"))
+    check(bool(stretch_files), "results/ holds the stretched product")
+    if stretch_files:
+        stretched_hdr = fits.getheader(stretch_files[0])
+        for key in ("STRETCH", "BLACK", "WHITE", "CAMPARS", "NCOMBINE", "NREJECT",
+                    "EXPOSURE", "TEMP_MED", "WIDTH"):
+            check(key in stretched_hdr, f"stretched header contains {key}")
+
+    # The per-frame capture path must never enumerate every camera property (performance).
+    from app.capture import CaptureService
+    frame_source = inspect.getsource(CaptureService._capture_phase)
+    check("get_all_properties" not in frame_source,
+          "_capture_phase never calls get_all_properties (per-frame path stays free)")
+
+    # A failing property read must not break the acquisition: the file is still written with props=null.
+    from app import camera_props as _camera_props
+
+    class _BrokenCamera:
+        id, name, serial, kind = "broken", "Broken", "BROKEN-1", "mock"
+
+        def get_all_properties(self):
+            raise RuntimeError("broken camera")
+
+    broken_dir = Path(tempfile.mkdtemp(prefix="camera-props-broken-"))
+    try:
+        broken_payload = _camera_props.ensure_session_props(
+            broken_dir, _BrokenCamera(), "broken-session")
+        check(broken_payload.get("props") is None,
+              "failed property read stores props=null instead of raising")
+        check((broken_dir / "camera_props.json").is_file(),
+              "failed property read still writes camera_props.json (pointer stays resolvable)")
+    finally:
+        shutil.rmtree(broken_dir, ignore_errors=True)
+
+    # A legacy session (no camera_props.json) is still processed, points at 'none' and flags MIXED.
+    legacy_id = "SMOKE_LEGACY_NO_CAMPARS"
+    legacy_dir = DATA_ROOT / "captures" / legacy_id
+    (legacy_dir / "light").mkdir(parents=True, exist_ok=True)
+    for idx, (gain, exposure) in enumerate(((10, 1000), (20, 2000)), start=1):
+        frame = np.full((32, 32), 100.0 * idx, dtype=np.uint16)
+        hdu = fits.PrimaryHDU(frame)
+        for key, value in (("EXPOSURE", exposure), ("GAIN", gain),
+                           ("BLACKLEV", 0.0), ("TEMP", -40.0), ("WIDTH", 32),
+                           ("HEIGHT", 32), ("OFFSETX", 0), ("OFFSETY", 0),
+                           ("REVERSX", False), ("REVERSY", False),
+                           ("CAMERA", "LegacyCam"), ("SERIAL", "LEGACY-1"),
+                           ("ORIENT", "FITS-BOTTOM-UP")):
+            hdu.header[key] = value
+        hdu.writeto(legacy_dir / "light" / f"LIGHT_{idx:04d}.fits", overwrite=True)
+
+    status, r = http_req("POST", "/api/process/calibrate",
+                         {"session_id": legacy_id, "sigma": 3, "method": "mean"})
+    check(status == 200, "legacy session without camera_props.json can be calibrated")
+    job = poll_job(r["data"]["job_id"]) if status == 200 else {}
+    check(job.get("status") == "done",
+          f"legacy calibrate done ({job.get('message')})")
+    status, r = http_req("POST", "/api/process/stack",
+                         {"session_id": legacy_id, "sigma": 3, "method": "mean"})
+    check(status == 200, "legacy session without camera_props.json can be stacked")
+    job = poll_job(r["data"]["job_id"]) if status == 200 else {}
+    check(job.get("status") == "done",
+          f"legacy stack done without camera_props.json ({job.get('message')})")
+    legacy_stack = legacy_dir / "results" / "STACK_sigma3.fits"
+    check(legacy_stack.is_file(), "legacy session produces STACK_sigma3.fits")
+    if legacy_stack.is_file():
+        legacy_hdr = fits.getheader(legacy_stack)
+        check(legacy_hdr.get("CAMPARS") == "none",
+              f"legacy STACK CAMPARS == 'none' (got {legacy_hdr.get('CAMPARS')!r})")
+        check(legacy_hdr.get("MIXED") is True,
+              "legacy STACK flags MIXED=T (gain/exposure differ between frames)")
+        check(legacy_hdr.get("CAMERA") == "LegacyCam"
+              and legacy_hdr.get("SERIAL") == "LEGACY-1",
+              "legacy STACK falls back to the CAMERA/SERIAL cards of the raw frames")
+        qc_path = legacy_dir / "results" / "qc_report.json"
+        try:
+            qc_mixed = (json.loads(qc_path.read_text(encoding="utf-8"))
+                        .get("mixed") or {})
+        except Exception as exc:  # noqa: BLE001
+            qc_mixed = {}
+            check(False, f"legacy qc_report.json is readable ({exc})")
+        gain_lists = {float(k): v for k, v in (qc_mixed.get("GAIN") or {}).items()}
+        exposure_lists = {float(k): v for k, v in
+                          (qc_mixed.get("EXPOSURE") or {}).items()}
+        check(gain_lists == {10.0: [1], 20.0: [2]},
+              f"qc_report mixed.GAIN lists the frames per value (got {qc_mixed.get('GAIN')!r})")
+        check(exposure_lists == {1000.0: [1], 2000.0: [2]},
+              "qc_report mixed.EXPOSURE lists the frames per value")
+
+
 def step_live_error():
     """P2 regression: persistent live grab failure must stop and expose an error."""
     status, r = http_req("POST", "/api/live/start",
@@ -1770,6 +1963,7 @@ def main():
         step_session_files()
         step_fits_orientation()
         step_processing()
+        step_camera_props()
         step_live_error()
 
         _, close = http_req("POST", "/api/device/close")

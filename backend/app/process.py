@@ -10,7 +10,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .fits_io import read_fits, read_fits_data, write_fits
+from .camera_props import (acquisition_entries, camera_identity,
+                           copy_cards, frame_entries, master_entries,
+                           merge_mixed, session_campers)
+from .fits_io import read_fits, read_fits_header, write_fits
 from .util import (ascii_fits_value, auto_contrast_8bit, get_captures_dir,
                    now_iso)
 
@@ -25,20 +28,6 @@ def _normalize_exclude(exclude: dict | None) -> dict[str, list[str]]:
         names = (exclude or {}).get(g) or []
         out[g] = list(dict.fromkeys(str(n) for n in names))
     return out
-
-
-def _load_group(session_dir: Path, group: str,
-                exclude_names: list[str] | None = None) -> list[np.ndarray]:
-    group_dir = session_dir / group
-    if not group_dir.is_dir():
-        return []
-    excluded = set(exclude_names or [])
-    frames = []
-    for p in sorted(group_dir.glob("*.fits")):
-        if p.name in excluded:
-            continue
-        frames.append(np.asarray(read_fits_data(p), dtype=np.float32))
-    return frames
 
 
 def _load_with_headers(session_dir: Path, group: str,
@@ -208,30 +197,44 @@ class ProcessService:
         exclude = _normalize_exclude(params.get("exclude"))
         excluded_counts = {g: len(v) for g, v in exclude.items()}
 
-        bias = _load_group(d, "bias", exclude["bias"])
-        dark = _load_group(d, "dark", exclude["dark"])
-        flat = _load_group(d, "flat", exclude["flat"])
+        bias_items = _load_with_headers(d, "bias", exclude["bias"])
+        dark_items = _load_with_headers(d, "dark", exclude["dark"])
+        flat_items = _load_with_headers(d, "flat", exclude["flat"])
+        bias = [it["data"] for it in bias_items]
+        dark = [it["data"] for it in dark_items]
+        flat = [it["data"] for it in flat_items]
         light_items = _load_with_headers(d, "light", exclude["light"])
         if not light_items:
             raise RuntimeError("light frames are empty, cannot calibrate")
-        dark_items = _load_with_headers(d, "dark", exclude["dark"])
-        flat_items = _load_with_headers(d, "flat", exclude["flat"])
+        # v1.7: the full camera parameter snapshot made at capture start; legacy sessions have none,
+        # and then the CAMPARS card simply says 'none'.
+        campers = session_campers(d)
+        cam_name, cam_serial = camera_identity(
+            d, bias_items or dark_items or flat_items or light_items)
 
         (d / "masters").mkdir(exist_ok=True)
         (d / "calibrated").mkdir(exist_ok=True)
+
+        def master_cards(items: list[dict]) -> dict:
+            """Temperature range + camera identity for one master (see ``camera_props.master_entries``)."""
+            rows = [{"nframe": i + 1, "header": it["header"]}
+                    for i, it in enumerate(items)]
+            return dict(master_entries(rows, campers, (cam_name, cam_serial)))
 
         master_bias = master_dark = master_flat = None
         if bias:
             self._update(job_id, progress=15, message=f"Synthesizing master_bias ({len(bias)} frames)")
             master_bias, _ = sigma_clipped_stack(bias, sigma, 3, method)
-            _write_fits(d / "masters" / "MASTER_BIAS.fits", master_bias)
+            _write_fits(d / "masters" / "MASTER_BIAS.fits", master_bias,
+                        **master_cards(bias_items))
         else:
             self._update(job_id, progress=15, message="No bias frames, skipping master_bias")
 
         if dark:
             self._update(job_id, progress=30, message=f"Synthesizing master_dark ({len(dark)} frames)")
             master_dark, _ = sigma_clipped_stack(dark, sigma, 3, method)
-            _write_fits(d / "masters" / "MASTER_DARK.fits", master_dark)
+            _write_fits(d / "masters" / "MASTER_DARK.fits", master_dark,
+                        **master_cards(dark_items))
         else:
             self._update(job_id, progress=30, message="No dark frames, skipping master_dark")
 
@@ -249,7 +252,8 @@ class ProcessService:
             if med <= 0:
                 raise RuntimeError("master_flat median is 0, cannot normalize")
             master_flat = (flat_mean / med).astype(np.float32)
-            _write_fits(d / "masters" / "MASTER_FLAT.fits", master_flat)
+            _write_fits(d / "masters" / "MASTER_FLAT.fits", master_flat,
+                        **master_cards(flat_items))
         else:
             self._update(job_id, progress=45, message="No flat frames, skipping master_flat")
 
@@ -280,8 +284,11 @@ class ProcessService:
             cal = np.nan_to_num(cal, nan=0.0, posinf=0.0, neginf=0.0)
             cal = np.maximum(cal, 0.0).astype(np.float32)
             out = d / "calibrated" / f"CAL_{n:04d}.fits"
-            _write_fits(out, cal, SESSION=ascii_fits_value(session_id),
-                        NFRAME=orig_idx + 1)
+            # v1.7: repeat the acquisition settings of the source light frame plus the CAMPARS pointer.
+            _write_fits(out, cal,
+                        **dict(frame_entries(item["header"], campers,
+                                             (cam_name, cam_serial))),
+                        SESSION=ascii_fits_value(session_id), NFRAME=orig_idx + 1)
             if n % max(1, len(all_light_items) // 10) == 0:
                 self._update(job_id, progress=55 + int(40 * n / max(
                     len(light_items), 1)),
@@ -320,6 +327,7 @@ class ProcessService:
         light_names = sorted(p.name for p in (d / "light").glob("*.fits")) \
             if (d / "light").is_dir() else []
         items = []
+        contributing = []
         for idx, p in enumerate(cal_files):
             data, hdr = read_fits(p)
             data = np.asarray(data, dtype=np.float32)
@@ -329,6 +337,7 @@ class ProcessService:
             if light_name is not None and light_name in excluded_light:
                 continue
             items.append(data)
+            contributing.append({"nframe": nframe, "light": light_name})
         if not items:
             raise RuntimeError("No usable light frames after exclusion, cannot stack")
 
@@ -360,6 +369,22 @@ class ProcessService:
             "elapsed_s": round(elapsed_s, 3),
             "excluded_counts": excluded_counts,
         }
+        # v1.7: acquisition settings of the frames that actually went into the stack. Medians plus the
+        # temperature range; discrete settings that differ are flagged with MIXED=T and itemised in
+        # qc_report.json, so the value lists stay machine readable.
+        campers = session_campers(d)
+        rows = []
+        for entry in contributing:
+            header = {}
+            if entry["light"] is not None:
+                header = dict(read_fits_header(d / "light" / entry["light"]))
+            rows.append({"nframe": entry["nframe"], "header": header})
+        cam_name, cam_serial = camera_identity(d, rows)
+        stack_entries, mixed = acquisition_entries(rows, campers,
+                                                   (cam_name, cam_serial))
+        stack_entries.append(("NCOMBINE", len(items)))
+        stack_entries.append(("NREJECT", max(0, len(light_names) - len(contributing))))
+
         (d / "results").mkdir(exist_ok=True)
         sigma_label = str(int(sigma)) if float(sigma).is_integer() else str(sigma)
         stem = (f"STACK_sigma{sigma_label}" if method == "mean"
@@ -367,8 +392,19 @@ class ProcessService:
         out_fits = d / "results" / f"{stem}.fits"
         # v1.1: STACK keeps float32 (BITPIX=-32) without truncation or uint16 conversion
         write_fits(out_fits, np.asarray(stacked, dtype=np.float32),
-                   [("SIGMA", sigma), ("METHOD", method), ("REGIS", registration)])
-        json.dump(qc, (d / "results" / "qc_report.json").open(
+                   [("SIGMA", sigma), ("METHOD", method), ("REGIS", registration)]
+                   + stack_entries)
+        qc_path = d / "results" / "qc_report.json"
+        if mixed:
+            previous_mixed = None
+            if qc_path.is_file():
+                try:
+                    previous_mixed = json.loads(
+                        qc_path.read_text(encoding="utf-8")).get("mixed")
+                except (OSError, ValueError):
+                    previous_mixed = None
+            qc["mixed"] = merge_mixed(previous_mixed, mixed)
+        json.dump(qc, qc_path.open(
             "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         self._update(job_id, progress=95, message="Writing STACK(float32) and qc_report")
         return {
@@ -426,7 +462,8 @@ class ProcessService:
             raise RuntimeError("white must be greater than black")
 
         self._update(job_id, progress=20, message=f"Reading {result_file}")
-        data = np.asarray(read_fits_data(src), dtype=np.float32)
+        source_data, source_header = read_fits(src)
+        data = np.asarray(source_data, dtype=np.float32)
         self._update(job_id, progress=45, message=f"Applying {stretch} stretch")
 
         v = (data - black) / (white - black)
@@ -444,8 +481,13 @@ class ProcessService:
         stem = Path(result_file).stem
         (d / "results").mkdir(exist_ok=True)
         out_name = f"{stem}_{stretch}.fits"
+        # v1.7: the stretched product inherits the camera cards of the stack it was made from
+        stretch_cards = copy_cards(source_header)
+        if not any(key == "CAMPARS" for key, _ in stretch_cards):
+            stretch_cards.append(("CAMPARS", session_campers(d)))
         write_fits(d / "results" / out_name, img16,
-                   [("STRETCH", stretch), ("BLACK", black), ("WHITE", white)])
+                   stretch_cards
+                   + [("STRETCH", stretch), ("BLACK", black), ("WHITE", white)])
         # 8-bit PNG preview (take the high 8 bits of the 16-bit stretched result)
         preview8 = (img16 >> 8).astype(np.uint8)
         Image.fromarray(preview8, mode="L").save(

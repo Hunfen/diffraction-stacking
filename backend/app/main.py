@@ -792,6 +792,14 @@ def snapshot(body: SnapshotBody):
                      for p in camera_service.get_properties()}
         except Exception:  # noqa: BLE001
             props = {}
+        # v1.7: the snapshots folder keeps one full parameter snapshot (camera_props.json); a snapshot
+        # is a manual action, so the extended read is acceptable here (never on the capture path).
+        all_props = {}
+        try:
+            all_props = {p["name"]: p["value"]
+                         for p in camera_service.get_all_properties()}
+        except Exception:  # noqa: BLE001
+            all_props = dict(props)
     except Exception as exc:  # noqa: BLE001
         raise_cam_err(exc)
     try:
@@ -800,7 +808,7 @@ def snapshot(body: SnapshotBody):
         except OSError as exc:
             raise HTTPException(400, f"Failed to create snapshot folder: {exc}")
         return ok(save_snapshot(frame, fmt, cam_info, props, folder, prefix,
-                                comment=comment))
+                                comment=comment, all_props=all_props))
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

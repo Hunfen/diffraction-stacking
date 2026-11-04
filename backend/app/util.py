@@ -292,7 +292,8 @@ def capture_metadata(props: dict, cam_name: str, cam_serial: str,
 
 
 def fits_header_entries(meta: dict, stats: dict | None = None,
-                        date_obs: str | None = None) -> list:
+                        date_obs: str | None = None,
+                        campers: str | None = None) -> list:
     """Build the FITS header key/value list ``list[(key, value)]`` (directly writable into an astropy header).
 
     - The 8-character keys of contract section 3.2: DATE-OBS/EXPOSURE/GAIN/BLACKLEV/TEMP/FRAMETYP/
@@ -302,6 +303,8 @@ def fits_header_entries(meta: dict, stats: dict | None = None,
       the corresponding key exists in props; the Mock-only keys MOCKPAT/MOCKSCE/MOCKDRIFT likewise);
     - User comment: converted to printable ASCII through ``ascii_fits_value()`` (FITS headers only
       accept ASCII); multiple lines are split on ``\\n`` into several ``COMMENT`` cards; empty lines are skipped.
+    - ``campers``: when given, a ``CAMPARS`` card points at the session ``camera_props.json`` (the
+      full 164-item parameter snapshot); see ``camera_props`` for the pointer convention.
     """
     props = dict((meta or {}).get("props") or {})
     camera = (meta or {}).get("camera") or {}
@@ -325,6 +328,8 @@ def fits_header_entries(meta: dict, stats: dict | None = None,
     for prop_key, hier_key in CAM_HIERARCH_KEYS:
         if prop_key in props:
             entries.append((f"HIERARCH CAM {hier_key}", props[prop_key]))
+    if campers:
+        entries.append(("CAMPARS", str(campers)))
     comment = str((meta or {}).get("comment") or "")
     for line in comment.split("\n"):
         if line.strip():

@@ -365,6 +365,7 @@ data/
   captures/
     2026-08-22T21-30-00_SAED_001/
       meta.json               # session 与各 phase 完整配置
+      camera_props.json       # 会话开始时冻结的全部相机参数（164 项，扁平 {name: value}）
       bias/  BIAS_0001.fits ...  + *_thumb.png
       dark/  DARK_0001.fits ...
       flat/  FLAT_0001.fits ...
@@ -372,7 +373,47 @@ data/
       masters/ MASTER_BIAS.fits  MASTER_DARK.fits  MASTER_FLAT.fits
       calibrated/ CAL_0001.fits ...
       results/ STACK_sigma3.fits  STACK_preview.png  qc_report.json
+  snapshots/
+    camera_props.json         # 快照目录用的参数快照（首次写快照时按需生成）
 ```
+
+---
+
+### 5.7 相机参数快照（camera_props.json 与 CAMPARS）
+
+真实 ic4 相机约有 164 个可控参数，逐帧全量读取会明显拖慢拍摄，因此采用「一次快照 + 指针卡」：
+
+- **快照时机**：会话 `start` 时（后台线程建好 session 目录之后）调用一次
+  `camera.get_all_properties()`，把结果写进 `<session>/camera_props.json`：
+  `{"generated_at", "device": {id, name, serial, kind}, "session", "props": {name: value, ...}}`。
+  `props` 保持**扁平**结构（不做逐参数 dict 扩展）。读取失败不阻断拍摄：文件照写、`props` 为 `null`
+  并记一条 warning，`CAMPARS` 指针依然可解析。
+- **指针卡**：FITS 只带一张 `CAMPARS` 卡，值是相对于**自身根目录**的 `camera_props.json`
+  （raw/calibrated/masters/results 相对会话目录，snapshots 相对快照目录），因此值就是文件名
+  `camera_props.json`。本次改动之前拍的旧会话没有该文件，`CAMPARS` 写 `none`，处理照常进行。
+- **快照 FITS**：`CAMPARS` 指向 `<snapshots>/camera_props.json`，文件不存在时当场写一份。
+- **采集（每帧）路径上全量读取只发生在会话启动**：`_capture_phase` 内只读
+  exposure/gain/black_level/device_temperature；手动快照与参数页会按需读取
+  （`/api/snapshot` 与 `/api/properties/all`），不属于采集路径。`scripts/backend_smoke.py` 用
+  `inspect.getsource` 固定「`_capture_phase` 内不出现 `get_all_properties`」这条约束。
+
+派生件头卡（连续量取参与帧的中位数，温度另给极值）：
+
+| 产物 | 头卡 |
+|---|---|
+| raw（bias/dark/flat/light） | 原有 14 卡 + 12 张 `HIERARCH CAM …` + `CAMPARS` |
+| calibrated | `EXPOSURE/GAIN/BLACKLEV/TEMP` + ROI 六项（`WIDTH/HEIGHT/OFFSETX/OFFSETY/REVERSX/REVERSY`）+ `CAMERA/SERIAL` + `CAMPARS` |
+| masters | 只写 `TEMP_MED/TEMP_MIN/TEMP_MAX` + `CAMERA/SERIAL` + `CAMPARS`（从简） |
+| STACK | `EXPOSURE/GAIN/BLACKLEV` + `TEMP_MED/TEMP_MIN/TEMP_MAX` + ROI 六项 + `CAMERA/SERIAL` + `NCOMBINE`（参与帧数）+ `NREJECT`（未参与帧数）+ `CAMPARS`，并保留 `SIGMA/METHOD/REGIS` |
+| stretched | 从源 STACK 复制上述卡，再写 `STRETCH/BLACK/WHITE` |
+
+`HIERARCH CAM …` 卡只为 `util.CAM_HIERARCH_KEYS` 中**当前相机确实存在**的属性写入：mock 相机 12 张，
+真实 ic4 相机 9 张（三个 `mock_*` 属性不存在）。项目里常说的「13 个采集属性」指真实相机的
+9 张相机卡加上 4 张顶层卡（`EXPOSURE/GAIN/BLACKLEV/TEMP`），并不是 13 张 `HIERARCH CAM` 卡。
+
+多帧不一致时：连续量仍写中位数；**离散量**（`EXPOSURE`、`GAIN`、ROI 六项）若取值不同，头里写
+`MIXED=T`，并把每个不同取值对应的帧号列表写进 `results/qc_report.json` 的 `mixed` 段
+（例如 `{"GAIN": {"10.0": [1], "20.0": [2]}}`；重复处理同一会话时按帧号去重追加）。
 
 ---
 

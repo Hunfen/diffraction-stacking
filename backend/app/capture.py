@@ -19,6 +19,8 @@ import tifffile
 from PIL import Image
 
 from .camera import CameraService
+from .camera_props import (CAMPARS_NONE, PROPS_FILENAME,
+                           ensure_session_props, ensure_snapshot_props)
 from .fits_io import write_fits
 from .util import (auto_contrast_8bit, capture_metadata, fits_header_entries,
                    frame_stats, get_captures_dir, get_data_root,
@@ -234,6 +236,14 @@ class CaptureService:
             self._session_id = session_id
             self._session_dir = session_dir
 
+        # v1.7: snapshot the full camera parameter set once per session; every frame then only carries
+        # a CAMPARS pointer (a full read inside the frame loop would cost ~164 property reads per frame).
+        try:
+            ensure_session_props(session_dir, self.camera, session_id, now_iso())
+            self._log(f"Camera parameters snapshot written to {PROPS_FILENAME}")
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Failed to snapshot camera parameters: {exc}")
+
         try:
             for idx, phase in enumerate(plan["phases"], start=1):
                 if self._abort_event.is_set():
@@ -424,8 +434,15 @@ class CaptureService:
             int(nframe),
             comment or "",
         )
-        entries = fits_header_entries(meta, stats)
+        entries = fits_header_entries(meta, stats, campers=self._campers_value())
         write_fits(path, np.asarray(frame, dtype=np.uint16), entries)
+
+    def _campers_value(self) -> str:
+        """``CAMPARS`` pointer of the current session (``none`` when the snapshot file is missing)."""
+        session_dir = self._session_dir
+        if session_dir is not None and (session_dir / PROPS_FILENAME).is_file():
+            return PROPS_FILENAME
+        return CAMPARS_NONE
 
     def _write_meta(self, session_dir: Path, session_id: str,
                     plan: dict, status: str) -> None:
@@ -451,7 +468,8 @@ class CaptureService:
 
 def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
                   props: dict | None = None, folder: str | Path = "",
-                  prefix: str = "", comment: str = "") -> dict:
+                  prefix: str = "", comment: str = "",
+                  all_props: dict | None = None) -> dict:
     """v1.4: single-frame snapshot whose filename always carries a timestamp.
 
     v1.6: the FITS header holds the full camera parameters (HIERARCH CAM ...) plus the user
@@ -475,10 +493,17 @@ def save_snapshot(frame: np.ndarray, fmt: str, cam: dict | None = None,
     meta = capture_metadata(props, cam.get("name", "unknown"),
                             cam.get("serial", "unknown"), "SNAPSHOT",
                             "SNAPSHOT", 1, comment or "")
+    # v1.7: snapshots share one parameter snapshot under the snapshots root; the FITS header only
+    # carries the CAMPARS pointer, and the file is written on the spot when it is still missing.
+    campers = ensure_snapshot_props(
+        base,
+        all_props if all_props is not None else props,
+        {"id": "", "name": cam.get("name", "unknown"),
+         "serial": cam.get("serial", "unknown"), "kind": ""})
     if fmt == "fits":
         ext = "fits"
         name = f"{prefix}_{ts}.{ext}" if prefix else f"{ts}.{ext}"
-        entries = fits_header_entries(meta, frame_stats(frame))
+        entries = fits_header_entries(meta, frame_stats(frame), campers=campers)
         write_fits(snap_dir / name, np.asarray(frame, dtype=np.uint16), entries)
     elif fmt == "tiff":
         ext = "tiff"

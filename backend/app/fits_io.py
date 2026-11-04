@@ -56,3 +56,8 @@ def read_fits(path: str | Path) -> tuple[np.ndarray, fits.Header]:
 def read_fits_data(path: str | Path) -> np.ndarray:
     """Return only the data, oriented like the live preview (sensor order)."""
     return read_fits(path)[0]
+
+
+def read_fits_header(path: str | Path) -> fits.Header:
+    """Return only the primary header (no pixel data is loaded)."""
+    return fits.getheader(Path(path), ext=0)
