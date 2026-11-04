@@ -612,7 +612,7 @@ def deploy(args):
         if not args.dry_run:
             raise
         # A dry run only previews the plan, so an unreachable target is a warning.
-        log_warn("cannot read the deployed commit on %s: %s" % (SSH_HOST, error.step))
+        log_warn("cannot read the deployed commit on %s" % SSH_HOST)
         if error.output:
             log_warn(tail_of(error.output).splitlines()[-1])
 
