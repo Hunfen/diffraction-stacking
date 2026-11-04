@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -151,6 +151,13 @@ export default function CapturePage() {
   const draftLoadedRef = useRef(false);
   // Serialized phases of the last write (or of the loaded draft), used to skip no-op writes
   const lastSavedRef = useRef('');
+  // Bumped only by an explicit commit (blur/Enter in a cell, or a discrete table operation); it is the sole draft write trigger
+  const [commitTick, setCommitTick] = useState(0);
+  const commitDraft = useCallback(() => setCommitTick((n) => n + 1), []);
+  // The current rows, read by the commit effect so that typing never re-triggers a write
+  const rowsRef = useRef<PhaseRow[]>([]);
+  // Serialized phases already in flight, so a blur followed by Enter cannot write the same draft twice
+  const inFlightRef = useRef('');
   const [starting, setStarting] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [captureState, setCaptureState] = useState<CaptureState>(IDLE_STATE);
@@ -257,9 +264,11 @@ export default function CapturePage() {
     };
   }, [captureState.session_name, refreshThumbs]);
 
-  const applyTemplate = () => {
+  // Discrete operations save immediately: they rebuild the table rather than edit a single cell.
+  const applyTemplate = useCallback(() => {
     setRows(draftRows(DEFAULT_PHASES));
-  };
+    commitDraft();
+  }, [commitDraft]);
 
   const updateRow = (key: string, patch: Partial<PhaseRow>) => {
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
@@ -274,6 +283,7 @@ export default function CapturePage() {
       next.splice(target, 0, row);
       return next;
     });
+    commitDraft();
   };
 
   const currentPhases = (): CapturePhaseStored[] => toStoredPhases(rows);
@@ -321,40 +331,48 @@ export default function CapturePage() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, []);
+  }, [applyTemplate]);
 
   useEffect(() => {
     const timer = setTimeout(() => void refreshSets(), 0);
     return () => clearTimeout(timer);
   }, [refreshSets]);
 
-  // Any phase-table change saves the draft within 500ms (draft file only, named sets untouched).
+  // Keep the latest rows reachable from the commit effect without making every keystroke a write trigger.
+  // Layout effect, so a blur in the same tick as the last keystroke already sees the newest cell value.
+  useLayoutEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+
+  // The only draft write path: an explicit commit saves the whole current table once (draft file only, named sets untouched).
   useEffect(() => {
     if (!draftLoadedRef.current) return;
-    const phases = toDraftPhases(rows);
+    const phases = toDraftPhases(rowsRef.current);
     const serialized = serializeDraftPhases(phases);
-    if (serialized === lastSavedRef.current) return;
-    const timer = setTimeout(() => {
-      void apiPut<CaptureDraft>('/api/capture/draft', { phases }, { silent: true })
-        .then(() => {
-          lastSavedRef.current = serialized;
-        })
-        .catch((err) => {
-          // Keep lastSavedRef unchanged so the next edit retries, but never drop the edit silently.
-          message.error({
-            content: `Failed to save the capture draft${draftErrorDetail(err)}`,
-            key: 'capture-draft-save',
-          });
+    if (serialized === lastSavedRef.current || serialized === inFlightRef.current) return;
+    inFlightRef.current = serialized;
+    void apiPut<CaptureDraft>('/api/capture/draft', { phases }, { silent: true })
+      .then(() => {
+        lastSavedRef.current = serialized;
+      })
+      .catch((err) => {
+        // Keep lastSavedRef unchanged so the next commit retries, but never drop the edit silently.
+        message.error({
+          content: `Failed to save the capture draft${draftErrorDetail(err)}`,
+          key: 'capture-draft-save',
         });
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [rows]);
+      })
+      .finally(() => {
+        if (inFlightRef.current === serialized) inFlightRef.current = '';
+      });
+  }, [commitTick]);
 
   const loadSet = async (name: string) => {
     try {
       const set = await apiGet<CaptureSet>(setUrl(name));
       setRows(storedRows(set.phases));
       setSelectedSet(set.name);
+      commitDraft();
     } catch {
       /* The API client already showed the error */
     }
@@ -509,7 +527,10 @@ export default function CapturePage() {
           value={row.type}
           style={{ width: '100%' }}
           disabled={active}
-          onChange={(v: PhaseType) => updateRow(row.key, { type: v })}
+          onChange={(v: PhaseType) => {
+            updateRow(row.key, { type: v });
+            commitDraft();
+          }}
           options={(Object.keys(PHASE_LABELS) as PhaseType[]).map((t) => ({
             value: t,
             label: PHASE_LABELS[t],
@@ -532,6 +553,8 @@ export default function CapturePage() {
           onChange={(v) => {
             if (v !== null) updateRow(row.key, { count: v });
           }}
+          onBlur={commitDraft}
+          onPressEnter={commitDraft}
         />
       ),
     },
@@ -548,6 +571,8 @@ export default function CapturePage() {
           style={{ width: '100%' }}
           disabled={active}
           onChange={(v) => updateRow(row.key, { exposure_us: v })}
+          onBlur={commitDraft}
+          onPressEnter={commitDraft}
         />
       ),
     },
@@ -560,6 +585,8 @@ export default function CapturePage() {
           placeholder="Phase note (optional)"
           disabled={active}
           onChange={(e) => updateRow(row.key, { note: e.target.value })}
+          onBlur={commitDraft}
+          onPressEnter={commitDraft}
         />
       ),
     },
@@ -585,7 +612,10 @@ export default function CapturePage() {
             danger
             icon={<DeleteOutlined />}
             disabled={active}
-            onClick={() => setRows((prev) => prev.filter((r) => r.key !== row.key))}
+            onClick={() => {
+              setRows((prev) => prev.filter((r) => r.key !== row.key));
+              commitDraft();
+            }}
           />
         </Space>
       ),
@@ -695,7 +725,14 @@ export default function CapturePage() {
           <Button disabled={active} onClick={applyTemplate}>
             Default Diffraction Set (bias × 50, dark × 30, flat × 30, light × 100)
           </Button>
-          <Button icon={<PlusOutlined />} disabled={active} onClick={() => setRows((prev) => [...prev, newRow()])}>
+          <Button
+            icon={<PlusOutlined />}
+            disabled={active}
+            onClick={() => {
+              setRows((prev) => [...prev, newRow()]);
+              commitDraft();
+            }}
+          >
             Add Phase
           </Button>
         </Space>
