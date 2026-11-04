@@ -578,17 +578,32 @@ function RoiNumberInput({
   onPut: (name: string, value: number) => Promise<PropertyPutResult | undefined>;
 }) {
   // External value changes remount via the parent's key={name:value}, which keeps setState out of the effect
-  const [value, setValue] = useState<number>(() => Number(prop.value));
+  const [value, setValue] = useState<number | null>(() => Number(prop.value));
+  // Bumped by blur/Enter only; the commit waits for InputNumber to re-parse and clamp the typed text first
+  const [commitTick, setCommitTick] = useState(0);
+  // Value already being written, so a blur followed by Enter cannot write the same number twice
+  const inFlightRef = useRef<number | null>(null);
 
-  const apply = async (v: number | null) => {
-    if (v === null || !Number.isFinite(v)) return;
-    setValue(v);
-    try {
-      await onPut(prop.name, v);
-    } catch {
-      setValue(Number(prop.value));
+  // Typing only edits the local value: the camera is written once, when the field is committed.
+  useEffect(() => {
+    if (commitTick === 0) return;
+    const current = Number(prop.value);
+    if (value === null || !Number.isFinite(value)) {
+      setValue(current);
+      return;
     }
-  };
+    if (disabled || value === current || value === inFlightRef.current) return;
+    inFlightRef.current = value;
+    void onPut(prop.name, value)
+      .catch(() => {
+        // Keep the old rollback semantics: a failed write shows the camera value again
+        setValue(current);
+      })
+      .finally(() => {
+        if (inFlightRef.current === value) inFlightRef.current = null;
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitTick]);
 
   return (
     <div>
@@ -602,9 +617,9 @@ function RoiNumberInput({
         value={value}
         disabled={disabled}
         style={{ width: '100%', marginTop: 4 }}
-        onChange={(v) => {
-          if (v !== null) void apply(v);
-        }}
+        onChange={(v) => setValue(v)}
+        onBlur={() => setCommitTick((n) => n + 1)}
+        onPressEnter={() => setCommitTick((n) => n + 1)}
       />
     </div>
   );
