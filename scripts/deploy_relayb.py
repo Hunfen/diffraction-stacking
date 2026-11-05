@@ -415,11 +415,30 @@ def write_bat(args, work_dir):
     return bat_path
 
 
+def decode_remote_line(raw):
+    """Decode one line of relayB console output without relying on the locale.
+
+    relayB is a Chinese Windows host: cmd.exe and schtasks write CP936 (GBK)
+    bytes, so decoding them as UTF-8 raises UnicodeDecodeError. Try UTF-8 first
+    (git, npm and the .bat's own echoes), then CP936, and finally fall back to
+    replacement characters: one odd byte must never abort a run that has
+    already stopped the service.
+    """
+    for encoding in ("utf-8", "cp936"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 def run_remote_bat(remote_bat_path):
     """Run the .bat through ssh, streaming its output while keeping the tail.
 
     The output is streamed to this terminal; it is never redirected to a file or
     to /dev/null on the remote side (doing that hangs the ssh session on relayB).
+    stdout is read as bytes and decoded per line (UTF-8, then CP936) because the
+    remote console is CP936 while text=True would use this machine's locale.
     """
     command = ["ssh"] + SSH_OPTIONS + [SSH_HOST, remote_bat_path]
     log("$ %s" % " ".join(command))
@@ -427,14 +446,12 @@ def run_remote_bat(remote_bat_path):
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
     lines = []
     tail = deque(maxlen=TAIL_LINES)
     assert process.stdout is not None
-    for line in process.stdout:
-        text = line.rstrip("\r\n")
+    for raw_line in process.stdout:
+        text = decode_remote_line(raw_line).rstrip("\r\n")
         print("    %s" % text, flush=True)
         lines.append(text)
         tail.append(text)
