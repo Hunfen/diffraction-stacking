@@ -214,7 +214,12 @@ def tail_of(text):
 def run(command, step=None):
     """Run a local command, echoing it so a failure can be reproduced."""
     log("$ %s" % " ".join(command))
-    process = subprocess.run(command, capture_output=True, text=True)
+    process = subprocess.run(command, capture_output=True)
+    # ssh output comes from relayB, a Chinese Windows host: cmd/schtasks/ssh print
+    # CP936 bytes that text=True would decode with this machine's UTF-8 locale.
+    # Normalise newlines as text mode did, so callers still see plain "\n".
+    process.stdout = decode_remote_line(process.stdout).replace("\r\n", "\n").replace("\r", "\n")
+    process.stderr = decode_remote_line(process.stderr).replace("\r\n", "\n").replace("\r", "\n")
     if process.returncode != 0 and step is not None:
         raise DeployError(
             step,
@@ -416,13 +421,14 @@ def write_bat(args, work_dir):
 
 
 def decode_remote_line(raw):
-    """Decode one line of relayB console output without relying on the locale.
+    """Decode relayB output bytes without relying on the locale.
 
     relayB is a Chinese Windows host: cmd.exe and schtasks write CP936 (GBK)
     bytes, so decoding them as UTF-8 raises UnicodeDecodeError. Try UTF-8 first
     (git, npm and the .bat's own echoes), then CP936, and finally fall back to
     replacement characters: one odd byte must never abort a run that has
-    already stopped the service.
+    already stopped the service. Used per line while streaming run_remote_bat()
+    and on the whole captured stdout/stderr of run() and ssh().
     """
     for encoding in ("utf-8", "cp936"):
         try:
@@ -502,14 +508,17 @@ def check_health(args):
     log_step("checking the HTTP API on %s" % REMOTE_API)
     body = wait_for_api(REMOTE_API)
     try:
-        payload = json.loads(body.decode("utf-8", "replace"))
+        envelope = json.loads(body.decode("utf-8", "replace"))
     except ValueError:
         raise DeployError("/api/health did not return JSON", output=body.decode("utf-8", "replace")[:400])
+    # /api/health answers with an envelope: {"ok": true, "data": {...}, "error": null}.
+    # Fall back to the flat body so an older backend still validates.
+    payload = envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope
     driver = str(payload.get("camera_driver"))
     if driver != "ic4":
         raise DeployError(
             "/api/health reports camera_driver=%s instead of ic4" % driver,
-            output=json.dumps(payload, ensure_ascii=False)[:400],
+            output=json.dumps(envelope, ensure_ascii=False)[:400],
         )
     log_ok("/api/health: camera_driver=ic4")
 
