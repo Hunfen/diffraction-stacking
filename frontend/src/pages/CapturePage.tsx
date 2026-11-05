@@ -720,10 +720,8 @@ export default function CapturePage() {
               Delete
             </Button>
           </Popconfirm>
-        </Space>
-        <Space wrap style={{ marginBottom: 12 }}>
           <Button disabled={active} onClick={applyTemplate}>
-            Default Diffraction Set (bias × 50, dark × 30, flat × 30, light × 100)
+            Default
           </Button>
           <Button
             icon={<PlusOutlined />}
@@ -742,7 +740,7 @@ export default function CapturePage() {
           columns={columns}
           dataSource={rows}
           pagination={false}
-          locale={{ emptyText: 'No phases yet. Click "Default Diffraction Set" or "Add Phase".' }}
+          locale={{ emptyText: 'No phases yet. Click "Default" or "Add Phase".' }}
           scroll={{ x: 900 }}
         />
         <Space style={{ marginTop: 12 }}>

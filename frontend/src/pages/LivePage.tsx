@@ -25,7 +25,6 @@ import {
   Tag,
   Typography,
   message,
-  notification,
 } from 'antd';
 import {
   CameraOutlined,
@@ -640,14 +639,33 @@ export default function LivePage() {
   useEffect(() => {
     if (livePreviewInfoShownRef.current) return;
     livePreviewInfoShownRef.current = true;
-    notification.info({
+    message.info({
       key: 'live-preview-info',
-      message: 'Live Preview',
-      description: 'The preview is an 8-bit grayscale auto-contrast image (1%–99% percentile linear stretch) and does not modify camera acquisition parameters.',
-      placement: 'topRight',
+      content: (
+        <>
+          <div>Live Preview</div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>
+            The preview is an 8-bit grayscale auto-contrast image (1%–99% percentile linear stretch) and does not modify camera acquisition parameters.
+          </div>
+        </>
+      ),
       duration: 6,
     });
   }, []);
+  // Centered warning on the rising edge of streamStarted (including a mount while it is already streaming); silent on stop.
+  const streamingWarningShownRef = useRef(false);
+  useEffect(() => {
+    if (!streamStarted) {
+      streamingWarningShownRef.current = false;
+      return;
+    }
+    if (streamingWarningShownRef.current) return;
+    streamingWarningShownRef.current = true;
+    message.warning({
+      key: 'live-streaming-warning',
+      content: 'Acquisition is streaming — stop acquisition before changing the capture region.',
+    });
+  }, [streamStarted]);
   // The ROI is locked while acquisition is starting or running so a write during the start transition is not rejected.
   const acquisitionLocked = streamStarted || acquisitionPending;
   const {
@@ -1271,7 +1289,16 @@ export default function LivePage() {
         </Col>
 
         <Col xs={24} lg={8}>
-          <Card size="small" title="Capture Region (Width × Height)" loading={propsLoading}>
+          <Card
+            size="small"
+            title="Capture Region"
+            loading={propsLoading}
+            extra={
+              <Tag color={streamStarted ? 'red' : acquisitionPending ? 'orange' : 'default'}>
+                On Air
+              </Tag>
+            }
+          >
             {roiProps.length === 0 && !propsLoading ? (
               propertiesError ? (
                 <Typography.Text type="danger">
@@ -1295,22 +1322,6 @@ export default function LivePage() {
                     Full-frame maximum: {roiMaxText} · Two-way sync with preview drag
                   </Typography.Text>
                 </div>
-                {streamStarted ? (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    message="Acquisition is streaming"
-                    description="Stop acquisition before changing the capture region."
-                  />
-                ) : acquisitionPending ? (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Starting acquisition — capture region editing is temporarily locked.
-                  </Typography.Text>
-                ) : (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Acquisition is stopped — you can edit the capture region.
-                  </Typography.Text>
-                )}
                 <Row gutter={[12, 12]}>
                   {roiProps.map((p) => (
                     <Col xs={12} key={p.name}>
