@@ -22,7 +22,7 @@
 - 实时预览：WebSocket 推送 JPEG 帧 + 逐帧统计（min/max/mean/std/饱和比例/256-bin 直方图）
 - 参数面板：曝光 / 增益 / 黑电平 / 自动曝光开关 / 自动增益开关 / 采集区域（Width × Height）/ 镜像 / 触发等即调即生效，显示相机实际返回值
 - 四相位序列拍摄：`BIAS → DARK → FLAT → LIGHT`，每相位有引导提示；
-  **LIGHT 前强制人工对照实时直方图确认参数**（中心束过曝程度由人工判断）
+  **FLAT 与 LIGHT 前强制人工确认**（BIAS / DARK 自动继续；FLAT 检查均匀照明，LIGHT 对照实时直方图；中心束过曝程度由人工判断）
 - 坏帧排除：处理时按文件名 `exclude`，前后端真实生效
 - 处理任务：calibrate / stack / stretch 后台 job 化，进度经 WebSocket 推送
 - 数据落盘：16-bit FITS（含完整拍摄元数据）+ PNG 缩略图 + 会话 `meta.json`
@@ -151,7 +151,7 @@ cd backend
 1. **连接**：`/connect` 页选择 `mock-1`（开发）或 `ic4-<serial>`（真机）并打开
 2. **实时预览**：`/live` 页看画面与直方图，调曝光/增益/黑电平/采集区域/自动曝光/自动增益等参数
 3. **序列拍摄**：`/capture` 页创建计划（或点“默认衍射套装”），按提示依次完成
-   BIAS（盖镜头盖）→ DARK（保持盖盖）→ FLAT（束流散焦均匀照明）→ LIGHT（人工确认参数后开始）
+   BIAS（盖镜头盖）→ DARK（保持盖盖）→ FLAT（束流散焦均匀照明，人工确认后开始）→ LIGHT（人工确认参数后开始）
 4. **数据处理**：`/processing` 页选 session → 排除坏帧 → calibrate → stack → stretch 预览并下载结果
 
 ## 12-bit 数据链说明
@@ -203,7 +203,7 @@ cd frontend && npm run build && npm run lint
 
 - `IC4Camera` 真机路径尚未在 Windows 上实测，首次联调可能需微调属性枚举
 - 相机无 TEC 制冷：Dark 需与 Light 在邻近时间、相近温度下拍摄（系统记录每帧温度）
-- 中心束过曝不自动处理：按设计由人工在 LIGHT 前对照直方图确认参数
+- 中心束过曝不自动处理：按设计由人工在 FLAT / LIGHT 前确认参数（LIGHT 对照直方图）
 - macOS 只能运行 Mock 模式；真机采集必须部署在 Windows 主机
 
 ## 文档

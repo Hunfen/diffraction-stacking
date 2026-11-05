@@ -30,8 +30,8 @@ guiding, or de-rotation** is needed.
 - Parameter panel: exposure / gain / black level / auto exposure switch / auto gain switch / capture region (Width × Height) / mirror / trigger applied instantly,
   with the camera's actual value reported back
 - Four-phase sequence capture: `BIAS → DARK → FLAT → LIGHT` with guided prompts for each phase;
-  **before LIGHT the operator must manually confirm parameters against the live histogram**
-  (center-spot overexposure is judged by the operator)
+  **FLAT and LIGHT both require manual confirmation before they start; BIAS / DARK continue automatically**
+  (FLAT: uniform illumination; LIGHT: parameters against the live histogram; center-spot overexposure is judged by the operator)
 - Bad-frame exclusion: processing accepts per-filename `exclude` lists, enforced end-to-end
 - Processing jobs: calibrate / stack / stretch run as background jobs with WebSocket progress updates
 - Storage: 16-bit FITS with full acquisition metadata + PNG thumbnails + session `meta.json`
@@ -161,7 +161,7 @@ FastAPI serves `frontend/dist/` directly).
 1. **Connect**: on `/connect`, choose `mock-1` (development) or `ic4-<serial>` (real camera) and open it
 2. **Live view**: on `/live`, inspect the image and histogram, adjust exposure / gain / black level / capture region / auto exposure / auto gain etc.
 3. **Capture**: on `/capture`, create a plan (or click the default template) and follow the prompts:
-   BIAS (lens cap on) → DARK (cap still on) → FLAT (defocused beam / uniform illumination) →
+   BIAS (lens cap on) → DARK (cap still on) → FLAT (defocused beam / uniform illumination; confirm manually, then start) →
    LIGHT (confirm parameters manually, then start)
 4. **Process**: on `/processing`, pick a session → exclude bad frames → calibrate → stack → stretch preview and download results
 
@@ -218,7 +218,7 @@ Without hardware the backend always provides `mock-1`:
 - The camera has no TEC cooling: darks should be taken close in time/temperature to the lights
   (per-frame temperature is recorded)
 - Center-spot overexposure is intentionally not handled automatically; the operator confirms
-  parameters against the histogram before LIGHT
+  parameters before FLAT / LIGHT (histogram check for LIGHT)
 - macOS supports Mock mode only; real-camera acquisition must run on a Windows host
 
 ## Documentation

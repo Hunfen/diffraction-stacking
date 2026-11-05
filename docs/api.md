@@ -347,11 +347,11 @@ query：`?path=<绝对路径，可空>`
 - `status` ∈ `idle|running|waiting_user|capturing|finished|aborted|error`
 - `session_name` 为 effective session name（v1.2，含时间戳前缀）
 - `needs_user`：当前相位是否需要人工确认。**所有相位开始前都会进入 `waiting_user` 并给出该相位 prompt**；
-  非 LIGHT 相位 `needs_user=false`，展示约 0.2s 后自动进入 `capturing`（prompt 转入 `message`）；
-  **LIGHT 相位 `needs_user=true`，必须 POST /api/capture/resume 才进入 `capturing`**
+  BIAS / DARK 相位 `needs_user=false`，展示约 0.2s 后自动进入 `capturing`（prompt 转入 `message`）；
+  **FLAT 与 LIGHT 相位 `needs_user=true`，必须 POST /api/capture/resume 才进入 `capturing`**
 - 未 plan 时 status=`idle`
 
-**POST /api/capture/resume** — 无 body。仅在 `waiting_user` 且 `needs_user=true` 时有效（LIGHT 人工确认）；其他状态返回 409。
+**POST /api/capture/resume** — 无 body。仅在 `waiting_user` 且 `needs_user=true` 时有效（FLAT / LIGHT 强制人工确认，具体是哪个相位见 `current_phase`）；其他状态返回 409。确认后 `status` 切到 `capturing`，提示语按当前相位生成并写入 `log`（例如 `Parameters confirmed, starting FLAT capture`）。
 
 ```json
 { "ok": true, "data": { "status": "capturing" }, "error": null }

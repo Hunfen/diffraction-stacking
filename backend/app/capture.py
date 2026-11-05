@@ -3,7 +3,7 @@
 State machine (per the contract):
     idle -> running -> waiting_user (before each phase) -> capturing
          -> ... -> finished | aborted | error
-The waiting_user before the LIGHT phase is a **mandatory manual confirmation point**;
+The waiting_user before the FLAT and LIGHT phases is a **mandatory manual confirmation point**;
 acquisition continues only after resume.
 """
 from __future__ import annotations
@@ -29,6 +29,9 @@ from .util import (auto_contrast_8bit, capture_metadata, fits_header_entries,
 
 PHASE_TYPES = ("bias", "dark", "flat", "light")
 ACTIVE_STATUSES = {"running", "waiting_user", "capturing"}
+# Phases that must wait for a manual confirmation (POST /api/capture/resume) before capturing;
+# bias/dark only show a short non-blocking prompt and then continue automatically.
+MANUAL_CONFIRM_PHASES = ("flat", "light")
 
 PROMPTS = {
     "bias": "Cover the lens (sensor in complete darkness), then confirm to start capturing Bias (shortest exposure)",
@@ -169,11 +172,15 @@ class CaptureService:
                 raise RuntimeError("Not in waiting_user state, no resume needed")
             if not self._state.get("needs_user"):
                 raise RuntimeError("Current phase needs no manual confirmation and will continue automatically")
+            phase_type = (self._state.get("current_phase") or {}).get("type") or "unknown"
             self._resume_event.set()
-            self._state["status"] = "capturing"
-            self._state["prompt"] = None
-            self._state["message"] = "Parameters confirmed, starting LIGHT capture"
-            self._state["needs_user"] = False
+            # Message names the phase being started instead of a fixed "LIGHT" wording.
+            self._log(f"Parameters confirmed, starting {phase_type.upper()} capture")
+            self._state.update({
+                "status": "capturing",
+                "prompt": None,
+                "needs_user": False,
+            })
             self._push()
             return {"status": "capturing"}
 
@@ -251,13 +258,13 @@ class CaptureService:
                     return
                 ptype = phase["type"]
                 self._enter_phase(idx, len(plan["phases"]), phase)
-                if ptype == "light":
-                    # LIGHT requires manual confirmation: needs_user=true, wait for resume
+                if ptype in MANUAL_CONFIRM_PHASES:
+                    # FLAT and LIGHT require manual confirmation: needs_user=true, wait for resume
                     if not self._wait_resume():
                         self._finish("aborted", "Capture aborted")
                         return
                 else:
-                    # Non-light phases: waiting_user is shown for 0.2s (prompt moves into message)
+                    # Bias and dark: waiting_user is shown for 0.2s (prompt moves into message)
                     # and then capturing starts automatically, with no resume needed
                     deadline = time.monotonic() + 0.2
                     while time.monotonic() < deadline:
@@ -301,7 +308,7 @@ class CaptureService:
             status="waiting_user",
             current_phase={"type": ptype, "index": index, "total": total},
             prompt=prompt,
-            needs_user=(ptype == "light"),
+            needs_user=(ptype in MANUAL_CONFIRM_PHASES),
         )
         self._log(f"Preparing {ptype.upper()}: {prompt}")
         self._push()
@@ -328,8 +335,8 @@ class CaptureService:
         thumbs_dir = group_dir / "thumbs"
         consecutive_failures = 0
         successful_frames = 0
-        # Start the actual capture: status must be capturing (non-LIGHT is switched by _run,
-        # LIGHT is switched by resume; this guard keeps the two paths consistent)
+        # Start the actual capture: status must be capturing (bias/dark is switched by _run,
+        # manual-confirm phases by resume; this guard keeps the two paths consistent)
         self._set(status="capturing", needs_user=False)
         for n in range(1, int(phase["count"]) + 1):
             if self._abort_event.is_set():

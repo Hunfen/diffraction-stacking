@@ -29,7 +29,7 @@ python3.12 -m venv .venv   # Apple Silicon: /opt/homebrew/bin/python3.12; Intel:
 - 打开浏览器：`http://127.0.0.1:8000/docs`（Swagger UI）
 - Mock 设备 `mock-1` 始终可用，macOS 无 ic4 时自动使用 mock，全流程可跑
 - 端到端自测：`cd backend && .venv/bin/python ../scripts/backend_smoke.py`（退出码 0 = 通过）
-- 契约 v1.4：LIGHT 相位前 `needs_user=true` 必须人工 resume；calibrate/stack 支持
+- 契约 v1.4：FLAT / LIGHT 相位前 `needs_user=true` 必须人工 resume（BIAS / DARK 自动继续）；calibrate/stack 支持
   `exclude` 按文件名排除坏帧；`STACK_*.fits` 为 float32（BITPIX=-32）
 - FITS 温度关键字用短名 `TEMP`（°C），避免 astropy `TEMPERATURE` 触发的 HIERARCH VerifyWarning
 - Mock 性能（本机实测）：1920×1200 全分辨率帧生成约 22–24 fps（衍射场景）/

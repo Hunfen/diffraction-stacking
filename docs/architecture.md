@@ -190,10 +190,11 @@ idle → running → (phase 开始前) waiting_user → capturing → phase_done
 
 - 每个 Phase 分三段：`prepare_prompt（waiting_user）→ capture_loop → phase_report`
 - **所有相位开始前都进入 `waiting_user` 并给出英文 prompt**（与 api.md 契约一致）：
-  - 非 LIGHT 相位 `needs_user=false`：展示约 0.2s 后自动进入 `capturing`（prompt 转入 message）；
-  - **LIGHT 相位 `needs_user=true`：强制人工确认点**，前端展示实时预览 + 直方图 + 当前参数，
-    由人工对照直方图确认曝光/增益/黑电平设置（中心束过曝程度人工判断可接受）后
-    `POST /api/capture/resume` 才进入 `capturing`；系统不自动改参数、不强制束挡
+  - BIAS / DARK 相位 `needs_user=false`：展示约 0.2s 后自动进入 `capturing`（prompt 转入 message）；
+  - **FLAT 与 LIGHT 相位 `needs_user=true`：强制人工确认点**。FLAT 由人工确认已提供均匀照明
+    （散焦光束或平场光源）且视野内无衍射斑点；LIGHT 由人工对照实时预览 + 直方图确认曝光/增益/黑电平设置
+    （中心束过曝程度人工判断可接受）。两者都必须 `POST /api/capture/resume` 才进入 `capturing`；
+    系统不自动改参数、不强制束挡
 - `GET /api/capture/state` 与 `/ws/events` 的 capture 消息均携带 `needs_user` 字段
 - 当前实现中 FITS/缩略图由 capture runner 线程同步写入；采集线程与保存线程分离尚未实现（历史设计）
 - 每帧保存 **16-bit FITS**（数据在低 12 位）+ 缩略 PNG；TIFF 仅在快照接口支持，序列拍摄不导出 TIFF
@@ -243,6 +244,7 @@ gain / black_level / 采集区域 / binning / 触发设置，只有曝光和物�
 | 曝光 | 自动或手动调到帧均值 ≈ **40–60% 满阱**（约 1600–2400 ADU @12-bit） |
 | 数量 | 30–50 张 |
 | 曝光与 light 不同 | 自动拍匹配的 flat-dark（见 Phase 2 规则） |
+| 参数确认 | **强制人工确认**：进入本相位前停在 `waiting_user`（needs_user=true），人工确认已提供均匀照明且无衍射斑点后 `POST /api/capture/resume` 才开拍 |
 | QC 检查 | 峰值 < 4095（零饱和像素）；中位数在 30–70% 满阱；灰尘/污点进入报告 |
 | 合成方式 | master_flat = mean(flat − flat_dark)（或 − master_bias），归一化到中位数 = 1 |
 | 前端引导文案 | “Provide uniform illumination (defocused beam or flat light source) with no diffraction spots visible, then confirm to start capturing Flat” |
@@ -346,7 +348,7 @@ HIERARCH CAM MOCKPAT / MOCKSCE / MOCKDRIFT   # Mock 专属，仅存在时写入
 | POST | /api/snapshot | 单帧抓拍（16-bit FITS/TIFF/PNG） |
 | POST | /api/capture/plan | 创建拍摄计划（phases 非空；含 exclude 能力见 api.md） |
 | POST | /api/capture/start | 开始执行 |
-| POST | /api/capture/resume | LIGHT 人工确认后继续（waiting_user 且 needs_user=true） |
+| POST | /api/capture/resume | FLAT/LIGHT 人工确认后继续（waiting_user 且 needs_user=true） |
 | POST | /api/capture/abort | 中止 |
 | GET | /api/capture/state | 当前进度/needs_user/prompt |
 | GET | /api/sessions | Session 列表 |
@@ -506,10 +508,10 @@ data/
 
 ```
 创建 Plan → start
-每个 phase 开始前: waiting_user（英文 prompt；非 LIGHT needs_user=false，0.2s 后自动继续）
+每个 phase 开始前: waiting_user（英文 prompt；BIAS/DARK needs_user=false，0.2s 后自动继续）
 phase[0] bias:  连续拍 N 张（最短曝光）
 phase[1] dark:  提示盖镜头盖 → 自动进入 capturing → 连续拍 N 张（同 light 曝光）
-phase[2] flat:  提示均匀照明 → 自动进入 capturing → 拍 N 张
+phase[2] flat:  提示均匀照明 + needs_user=true → 人工确认 → resume → 拍 N 张
 phase[3] light: 提示恢复衍射条件 + needs_user=true → 人工对照直方图确认 → resume → 拍 N 张
 每帧: 采集(12p→uint16) → capture runner 同步写 FITS + 缩略图 → 更新进度 WS
 ```

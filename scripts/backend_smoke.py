@@ -892,7 +892,8 @@ def step_capture():
     check(state0.get("ok") and state0["data"].get("session_name") == effective,
           "capture state session_name uses effective name")
 
-    # v1.1 state machine: non-LIGHT phases waiting_user(needs_user=false) -> auto capturing
+    # v1.1 state machine: bias/dark are the only automatic phases
+    # (waiting_user with needs_user=false -> auto capturing after ~0.2s)
     bias_wait = poll_state(
         lambda s: s.get("status") == "waiting_user"
         and (s.get("current_phase") or {}).get("type") == "bias",
@@ -901,13 +902,63 @@ def step_capture():
           and bias_wait.get("needs_user") is False,
           "bias phase enters waiting_user with needs_user=false")
     _, rr = http_req("POST", "/api/capture/resume", expect=409)
-    check(not rr.get("ok"), "resume during non-LIGHT waiting_user returns 409")
+    check(not rr.get("ok"), "resume during bias waiting_user returns 409")
     bias_cap = poll_state(
         lambda s: s.get("status") == "capturing"
         and (s.get("current_phase") or {}).get("type") == "bias",
         timeout=10, interval=0.01)
     check(bias_cap.get("status") == "capturing" and bias_cap.get("needs_user") is False,
           "bias automatically enters capturing (needs_user=false)")
+
+    dark_wait = poll_state(
+        lambda s: s.get("status") == "waiting_user"
+        and (s.get("current_phase") or {}).get("type") == "dark",
+        timeout=10, interval=0.01)
+    check(dark_wait.get("status") == "waiting_user"
+          and dark_wait.get("needs_user") is False,
+          "dark phase enters waiting_user with needs_user=false")
+    _, rr = http_req("POST", "/api/capture/resume", expect=409)
+    check(not rr.get("ok"), "resume during dark waiting_user returns 409")
+    dark_cap = poll_state(
+        lambda s: s.get("status") == "capturing"
+        and (s.get("current_phase") or {}).get("type") == "dark",
+        timeout=10, interval=0.01)
+    check(dark_cap.get("status") == "capturing" and dark_cap.get("needs_user") is False,
+          "dark automatically enters capturing (needs_user=false)")
+
+    # FLAT is a mandatory manual confirmation point (same as LIGHT): it must stay blocked in
+    # waiting_user until POST /api/capture/resume, i.e. the 0.2s auto path must not fire.
+    flat_wait = poll_state(
+        lambda s: s.get("status") == "waiting_user"
+        and (s.get("current_phase") or {}).get("type") == "flat",
+        timeout=30, interval=0.01)
+    check(flat_wait.get("status") == "waiting_user"
+          and (flat_wait.get("current_phase") or {}).get("type") == "flat",
+          "waiting_user before FLAT (mandatory manual confirmation)")
+    check(flat_wait.get("needs_user") is True, "FLAT waiting_user needs_user=true")
+    check("uniform illumination" in (flat_wait.get("prompt") or ""),
+          "FLAT prompt contains uniform-illumination confirmation text")
+    time.sleep(0.6)  # longer than the 0.2s automatic window used by bias/dark
+    _, flat_stuck = http_req("GET", "/api/capture/state")
+    flat_stuck = flat_stuck.get("data") or {}
+    check(flat_stuck.get("status") == "waiting_user"
+          and (flat_stuck.get("current_phase") or {}).get("type") == "flat"
+          and flat_stuck.get("needs_user") is True,
+          "FLAT waiting_user does not auto-continue (still blocked after 0.6s)")
+    _, flat_resume = http_req("POST", "/api/capture/resume")
+    check(flat_resume.get("ok")
+          and (flat_resume.get("data") or {}).get("status") == "capturing",
+          "resume during FLAT waiting_user succeeds")
+    flat_cap = poll_state(
+        lambda s: s.get("status") == "capturing"
+        and (s.get("current_phase") or {}).get("type") == "flat",
+        timeout=10, interval=0.01)
+    check(flat_cap.get("status") == "capturing" and flat_cap.get("needs_user") is False,
+          "FLAT enters capturing only after resume (needs_user=false)")
+    _, flat_after = http_req("GET", "/api/capture/state")
+    check(any("starting FLAT capture" in e.get("msg", "")
+              for e in (flat_after.get("data") or {}).get("log", [])),
+          "resume message names the current phase (starting FLAT capture)")
 
     state = poll_state(
         lambda s: s.get("status") == "waiting_user"
@@ -917,6 +968,13 @@ def step_capture():
           "waiting_user before LIGHT (mandatory manual confirmation)")
     check(state.get("needs_user") is True, "LIGHT waiting_user needs_user=true")
     check("histogram" in (state.get("prompt") or ""), "LIGHT prompt contains histogram confirmation text")
+    time.sleep(0.6)  # longer than the 0.2s automatic window used by bias/dark
+    _, light_stuck = http_req("GET", "/api/capture/state")
+    light_stuck = light_stuck.get("data") or {}
+    check(light_stuck.get("status") == "waiting_user"
+          and (light_stuck.get("current_phase") or {}).get("type") == "light"
+          and light_stuck.get("needs_user") is True,
+          "LIGHT waiting_user does not auto-continue (still blocked after 0.6s)")
     check(state["current_phase"]["index"] == 4 and state["total_frames"] == 12,
           "state: phase 4/4, 12 frames total")
     check(any("BIAS" in e["msg"] for e in state.get("log", [])), "log contains BIAS done entry")
@@ -988,6 +1046,8 @@ def step_capture():
     if event_msg:
         check(event_msg["data"].get("needs_user") is False,
               "/ws/events capture message has needs_user=false (after resume)")
+        check("starting LIGHT capture" in (event_msg["data"].get("message") or ""),
+              "resume message names LIGHT (starting LIGHT capture)")
     _, r_again = http_req("POST", "/api/capture/resume", expect=409)
     check(not r_again.get("ok"), "resume again during capturing returns 409")
 
