@@ -85,7 +85,7 @@ cd backend
 
 1. **Connect**：选择 `mock-1`（无相机）或 `ic4-<serial>`（真机）并打开设备
 2. **Live**：查看实时预览与直方图，调节曝光 / 增益 / 黑电平 / 采集区域 / 自动曝光 / 自动增益等参数
-3. **Capture**：创建拍摄计划（可直接使用「默认衍射套装」），按提示依次完成
+3. **Capture**：创建拍摄计划（可直接使用「Default」），按提示依次完成
    Bias（盖镜头盖）→ Dark（保持盖盖）→ Flat（束流散焦均匀照明，人工确认后开始）→ Light（人工确认参数后开始）
 4. **Processing**：选择 session → 取消勾选坏帧 → Calibrate → Stack → Rescale 预览并下载结果
 
