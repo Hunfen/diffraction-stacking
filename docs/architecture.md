@@ -442,7 +442,7 @@ data/
 - 右上：实时直方图 + min/max/mean/饱和比例；FPS 显示
 - 右侧参数面板：
   - 曝光（µs/ms 单位切换）、增益（dB）、黑电平
-  - 采集区域（width/height/offset_x/offset_y 数字输入 + 拖框）、binning
+  - 采集区域（width/height/offset_x/offset_y 数字输入 + 拖框；数字输入在失焦或回车时提交，拖框在松手时提交）、binning
   - 触发模式、镜像、帧率
   - 自动对比度开关（单色灰阶映射，无彩色 LUT；仅影响预览显示）
   - 抓拍按钮（单帧存 FITS/TIFF/PNG）
@@ -453,7 +453,7 @@ data/
   `类型 | 张数 | 曝光覆盖 | 增益覆盖 | 说明 | 排序`
 - 快速模板按钮：「Default」= bias×50 + dark×30 + flat×30 + light×100
 - 执行进度条 + 实时缩略图墙（最后 20 帧）
-- 阶段间暂停弹窗：「请盖上镜头盖，开始拍 Dark」
+- 阶段间暂停弹窗：正文来自后端 `PROMPTS`（英文），例如 Dark 为 “Keep the lens covered. Dark uses the same exposure as Light. Confirm to start capturing Dark”
 - 单帧查看（可标记 Bad，后续处理自动排除）
 - 中止按钮（保留已拍帧）
 

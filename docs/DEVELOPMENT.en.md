@@ -27,8 +27,8 @@ guiding, or de-rotation** is needed.
 ## Features
 
 - Live preview: WebSocket JPEG stream + per-frame stats (min/max/mean/std/saturated-pct/256-bin histogram)
-- Parameter panel: exposure / gain / black level / auto exposure switch / auto gain switch / capture region (Width × Height) / mirror / trigger applied instantly,
-  with the camera's actual value reported back
+- Parameter panel: exposure / gain / black level / auto exposure switch / auto gain switch / capture region (Width × Height) / mirror / trigger; sliders and switches take effect immediately,
+  capture-region number fields commit on blur or Enter, showing the camera's actual values
 - Four-phase sequence capture: `BIAS → DARK → FLAT → LIGHT` with guided prompts for each phase;
   **FLAT and LIGHT both require manual confirmation before they start; BIAS / DARK continue automatically**
   (FLAT: uniform illumination; LIGHT: parameters against the live histogram; center-spot overexposure is judged by the operator)

@@ -450,7 +450,7 @@ Capture 页前端行为：
 - 命名 set 下拉（选中即加载到相位表；清空下拉不发请求）+ `Save As…` / `Overwrite` / `Delete` 三个操作；
   重名另存、覆写、删除各自弹一次确认
 - capture state 为 `running|waiting_user|capturing` 时：set 操作、相位表四个行内编辑器
-  （`type` / `count` / `exposure_us` / `note`）、`Add Phase` 与「填入默认模板」按钮全部禁用
+  （`type` / `count` / `exposure_us` / `note`）、`Add Phase` 与 `Default` 按钮全部禁用
 
 ### 2.7 Session 与文件
 

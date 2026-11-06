@@ -1251,7 +1251,7 @@ export default function LivePage() {
               <Space>
                 Camera Parameters
                 <Typography.Text type="secondary" style={{ fontWeight: 'normal', fontSize: 12 }}>
-                  Changes are written to the camera immediately and the returned actual value is shown
+                  Sliders and switches apply immediately; typed values apply on blur or Enter, and the returned actual value is shown
                 </Typography.Text>
               </Space>
             }

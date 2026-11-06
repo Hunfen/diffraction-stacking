@@ -10,7 +10,7 @@ The target is static, so no equatorial mount, guiding, or de-rotation is needed.
 ## Features
 
 - **Live preview & histogram**: view the live image and per-frame stats (min / max / mean / std / saturation ratio / 256-bin histogram)
-- **Parameter control**: exposure, gain, black level, auto exposure/auto gain switches, capture region (Width × Height), mirror, and trigger apply instantly, with the camera's actual values reported back
+- **Parameter control**: exposure, gain, black level, auto exposure/auto gain switches, capture region (Width × Height), mirror, and trigger are adjustable; sliders and switches take effect immediately, the four capture-region number fields commit on blur or Enter (dragging the region box commits on release), with the camera's actual values reported back
 - **Four-phase capture**: Bias → Dark → Flat → Light with guided prompts; **FLAT and LIGHT both require manual confirmation before they start (BIAS / DARK continue automatically)** — FLAT: uniform illumination; LIGHT: parameters against the histogram
 - **Bad-frame exclusion**: exclude frames by filename during processing; calibration / stacking both honor it
 - **Calibrate / Stack / Rescale preview**: Calibrate → Stack → Rescale, with live progress and downloadable results
